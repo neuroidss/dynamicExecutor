@@ -46,7 +46,7 @@
     <div id="stats-container"></div>
     <div id="info">
         Select a bot to control from the GUI. Use W,A,S,D or Left Joystick to move. Use Mouse or Right Joystick to look. Space or GUI Button to Jump.<br/>
-        PID Character: Arrow Keys (XZ), PageUp/PageDown (Y). Mouse to orbit camera. Sensor events logged to console.
+        PID Character: Arrow Keys (XZ), PageUp/PageDown (Y). Left Joystick (XZ Mobile), GUI Buttons (Y Mobile). Mouse/Right Joystick to orbit camera. Sensor events logged to console.
     </div>
     <div id="crosshair"></div>
 
@@ -260,6 +260,10 @@
             
             if (isMobile) {
                  document.getElementById('info').style.display = 'none'; 
+                 const pidFolder = gui.addFolder('PID Y Control (Mobile)');
+                 pidFolder.add({ func: () => { if (cameraTargetIsPidCharacter && pidCharacterElements.body) pidCharacterElements.movementDirection.y = pidCharacterSpeed; } }, 'func').name('PID Move Up');
+                 pidFolder.add({ func: () => { if (cameraTargetIsPidCharacter && pidCharacterElements.body) pidCharacterElements.movementDirection.y = -pidCharacterSpeed; } }, 'func').name('PID Move Down');
+                 pidFolder.add({ func: () => { if (cameraTargetIsPidCharacter && pidCharacterElements.body) pidCharacterElements.movementDirection.y = 0; } }, 'func').name('PID Stop Y');
             }
         }
         
@@ -276,6 +280,14 @@
             // Reset camera target state
             cameraTargetIsPidCharacter = false;
             controlledBotIndex = -1;
+            // Reset PID specific inputs if it was controlled
+            pidCharacterElements.movementDirection.x = 0;
+            pidCharacterElements.movementDirection.y = 0;
+            pidCharacterElements.movementDirection.z = 0;
+            // Reset bot specific inputs
+            userInput.forward = 0;
+            userInput.strafe = 0;
+
 
             if (selectedName === "PID Character") {
                 cameraTargetIsPidCharacter = true;
@@ -1584,8 +1596,11 @@
 
 
         function initJoysticks() {
+            console.log("initJoysticks called. isMobile:", isMobile);
             const leftJoystickZone = document.getElementById('joystick-zone-left');
             const rightJoystickZone = document.getElementById('joystick-zone-right');
+            console.log("Left Zone:", leftJoystickZone, "Right Zone:", rightJoystickZone);
+
 
             if (!leftJoystickZone || !rightJoystickZone) {
                 console.error("Joystick zones not found!");
@@ -1600,26 +1615,57 @@
             };
 
             const leftNipple = nipplejs.create({...joystickOptions, zone: leftJoystickZone }).get();
-            leftNipple.on('start move dir plain', (evt, data) => { 
-                if (data.vector && controlledBotIndex !== -1) {
-                    userInput.forward = data.vector.y; 
-                    userInput.strafe = data.vector.x; 
+            leftNipple.on('move', (evt, data) => { 
+                let vectorX = 0;
+                let vectorY = 0;
+                if (data.angle && typeof data.force === 'number' && data.force > 0.01) { // Added small threshold for force
+                    vectorX = data.force * Math.cos(data.angle.radian);
+                    vectorY = data.force * Math.sin(data.angle.radian); 
+                    console.log("Left joystick calculated - vectorX:", vectorX, "vectorY:", vectorY, "Force:", data.force, "Angle (rad):", data.angle.radian);
+                } else {
+                    console.log("Left joystick: No/low angle/force data. Raw data:", JSON.stringify(data));
+                }
+
+                if (controlledBotIndex !== -1) {
+                    userInput.forward = vectorY; 
+                    userInput.strafe = vectorX; 
+                } else if (cameraTargetIsPidCharacter) {
+                    pidCharacterElements.movementDirection.z = vectorY * pidCharacterSpeed; 
+                    pidCharacterElements.movementDirection.x = vectorX * pidCharacterSpeed;
                 }
             });
             leftNipple.on('end', () => {
-                userInput.forward = 0;
-                userInput.strafe = 0;
+                console.log("Left joystick end. Resetting input.");
+                if (controlledBotIndex !== -1) {
+                    userInput.forward = 0;
+                    userInput.strafe = 0;
+                }
+                if (cameraTargetIsPidCharacter) {
+                    pidCharacterElements.movementDirection.z = 0;
+                    pidCharacterElements.movementDirection.x = 0;
+                }
             });
 
 
             const rightNipple = nipplejs.create({...joystickOptions, zone: rightJoystickZone }).get();
-            rightNipple.on('start move dir plain', (evt, data) => {
-                if (data.vector && (controlledBotIndex !== -1 || cameraTargetIsPidCharacter)) { 
-                    cameraYaw -= data.vector.x * cameraRotationSpeed * 2.0; 
-                    cameraPitch -= data.vector.y * cameraRotationSpeed * 1.5; 
+            rightNipple.on('move', (evt, data) => {
+                let vectorX = 0;
+                let vectorY = 0;
+                 if (data.angle && typeof data.force === 'number' && data.force > 0.01) { // Added small threshold
+                    vectorX = data.force * Math.cos(data.angle.radian);
+                    vectorY = data.force * Math.sin(data.angle.radian);
+                    console.log("Right joystick calculated - vectorX:", vectorX, "vectorY:", vectorY, "Force:", data.force, "Angle (rad):", data.angle.radian);
+                } else {
+                     console.log("Right joystick: No/low angle/force data. Raw data:", JSON.stringify(data));
+                }
+
+                if (typeof vectorX === 'number' && typeof vectorY === 'number' && (controlledBotIndex !== -1 || cameraTargetIsPidCharacter)) { 
+                    cameraYaw -= vectorX * cameraRotationSpeed * 2.0; 
+                    cameraPitch -= vectorY * cameraRotationSpeed * 1.5; // Positive Y on joystick = up, so decrease pitch to look up
                     cameraPitch = Math.max(-Math.PI / 2 + 0.2, Math.min(Math.PI / 2 - 0.2, cameraPitch));
                 }
             });
+            // No specific 'end' action needed for camera joystick as it just stops changing view
         }
 
 
@@ -1636,7 +1682,7 @@
 
                 document.addEventListener('keydown', (event) => {
                     // Controlled Bot Input
-                    if (controlledBotIndex !== -1 && (document.pointerLockElement === renderer.domElement || isMobile)) { 
+                    if (controlledBotIndex !== -1 && document.pointerLockElement === renderer.domElement) { 
                         switch(event.key.toLowerCase()) {
                             case 'w': userInput.forward = 1; break;
                             case 's': userInput.forward = -1; break;
@@ -1663,7 +1709,7 @@
                 });
                 document.addEventListener('keyup', (event) => {
                     // Controlled Bot Input
-                     if (controlledBotIndex !== -1 && (document.pointerLockElement === renderer.domElement || isMobile)) {
+                     if (controlledBotIndex !== -1 && document.pointerLockElement === renderer.domElement) {
                         switch(event.key.toLowerCase()) {
                             case 'w': if (userInput.forward === 1) userInput.forward = 0; break;
                             case 's': if (userInput.forward === -1) userInput.forward = 0; break;
@@ -1727,7 +1773,7 @@
 
             platformTimer += deltaTime;
             
-            const newLinvelY = Math.sin(platformTimer * 1.0) * 15.0;//1.5 
+            const newLinvelY = Math.sin(platformTimer * 1.0) * 35.0; // Changed from 1.5 to 35.0
             const newAngvelY = Math.cos(platformTimer * 0.5) * 0.3; 
 
             platformRB.setLinvel({ x: 0.0, y: newLinvelY, z: 0.0 }, true);
@@ -1870,35 +1916,47 @@
         }
 
         function updatePidCharacter(deltaTime) {
-            if (!pidCharacterElements.body || !pidCharacterElements.controller || !R || !world) return;
+            if (!cameraTargetIsPidCharacter || !pidCharacterElements.body || !pidCharacterElements.controller || !R || !world) return;
 
             const characterRB = world.getRigidBody(pidCharacterElements.body.handle);
             if (!characterRB) return;
 
             const pidController = pidCharacterElements.controller; 
-            
             if (!pidController) return; 
 
             const targetVelocity = { x: 0.0, y: 0.0, z: 0.0 }; 
+            
+            // PID character movement direction is directly set by keyboard or joystick (for XZ) and GUI (for Y)
+            const moveX = pidCharacterElements.movementDirection.x;
+            const moveY = pidCharacterElements.movementDirection.y;
+            const moveZ = pidCharacterElements.movementDirection.z;
 
-            if (pidCharacterElements.movementDirection.x === 0.0 &&
-                pidCharacterElements.movementDirection.y === 0.0 &&
-                pidCharacterElements.movementDirection.z === 0.0) {
+            if (moveX === 0.0 && moveY === 0.0 && moveZ === 0.0) {
                 pidController.setAxes(R.PidAxesMask.AllAng); 
-            } else if (pidCharacterElements.movementDirection.y === 0.0) {
+            } else if (moveY === 0.0) { // If no Y input, PID controls XZ linear and all angular
                 pidController.setAxes(R.PidAxesMask.AllAng | R.PidAxesMask.LinX | R.PidAxesMask.LinZ);
-            } else {
+            } else { // If Y input, PID controls all linear and all angular
                 pidController.setAxes(R.PidAxesMask.All); 
             }
             
             const currentPos = characterRB.translation();
+            const yawQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), cameraYaw);
+            const worldMoveDirection = new THREE.Vector3(moveX, 0, moveZ).applyQuaternion(yawQuaternion);
+
             const targetPoint = new R.Vector3(
-                currentPos.x + pidCharacterElements.movementDirection.x,
-                currentPos.y + pidCharacterElements.movementDirection.y,
-                currentPos.z + pidCharacterElements.movementDirection.z
+                currentPos.x + worldMoveDirection.x,
+                currentPos.y + moveY, // Y is directly applied, not affected by camera yaw
+                currentPos.z + worldMoveDirection.z
             );
 
             pidController.applyLinearCorrection(characterRB, targetPoint, targetVelocity);
+            
+            // Update target rotation for PID character based on camera yaw
+            // This makes the PID character align with the camera's forward direction
+            const targetQuat = new R.Quaternion();
+            targetQuat.setFromAxisAngle(new R.Vector3(0,1,0), cameraYaw);
+            pidCharacterElements.targetRotation = targetQuat;
+
             pidController.applyAngularCorrection(characterRB, pidCharacterElements.targetRotation, targetVelocity);
         }
 
@@ -2158,7 +2216,7 @@
                 document.addEventListener('pointerlockchange', onPointerLockChange, false);
 
                 document.addEventListener('keydown', (event) => {
-                    if (document.pointerLockElement === renderer.domElement || isMobile) { 
+                    if (document.pointerLockElement === renderer.domElement) { 
                         if (controlledBotIndex !== -1) { 
                             switch(event.key.toLowerCase()) {
                                 case 'w': userInput.forward = 1; break;
@@ -2173,7 +2231,7 @@
                             }
                         }
                     }
-                    if (pidCharacterElements.body) {
+                    if (pidCharacterElements.body) { // PID keyboard always active if body exists
                          switch(event.key) { 
                             case 'ArrowUp': pidCharacterElements.movementDirection.z = pidCharacterSpeed; break;
                             case 'ArrowDown': pidCharacterElements.movementDirection.z = -pidCharacterSpeed; break;
@@ -2185,7 +2243,7 @@
                     }
                 });
                 document.addEventListener('keyup', (event) => {
-                     if (document.pointerLockElement === renderer.domElement || isMobile) {
+                     if (document.pointerLockElement === renderer.domElement) { 
                          if (controlledBotIndex !== -1) {
                             switch(event.key.toLowerCase()) {
                                 case 'w': if (userInput.forward === 1) userInput.forward = 0; break;
@@ -2198,7 +2256,7 @@
                             }
                         }
                     }
-                    if (pidCharacterElements.body) {
+                    if (pidCharacterElements.body) { // PID keyboard always active
                         switch(event.key) {
                             case 'ArrowUp': if (pidCharacterElements.movementDirection.z > 0) pidCharacterElements.movementDirection.z = 0; break;
                             case 'ArrowDown': if (pidCharacterElements.movementDirection.z < 0) pidCharacterElements.movementDirection.z = 0; break;
