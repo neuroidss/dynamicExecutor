@@ -1623,19 +1623,20 @@
                     vectorY = data.force * Math.sin(data.angle.radian); 
                     console.log("Left joystick calculated - vectorX:", vectorX, "vectorY:", vectorY, "Force:", data.force, "Angle (rad):", data.angle.radian);
                 } else {
-                    console.log("Left joystick: No/low angle/force data. Raw data:", JSON.stringify(data));
+                    // console.log("Left joystick: No/low angle/force data. Raw data:", JSON.stringify(data));
                 }
 
                 if (controlledBotIndex !== -1) {
                     userInput.forward = vectorY; 
                     userInput.strafe = vectorX; 
                 } else if (cameraTargetIsPidCharacter) {
-                    pidCharacterElements.movementDirection.z = vectorY * pidCharacterSpeed; 
-                    pidCharacterElements.movementDirection.x = vectorX * pidCharacterSpeed;
+                    // For PID, left joystick controls XZ movement relative to camera
+                    pidCharacterElements.movementDirection.z = vectorY * pidCharacterSpeed ; 
+                    pidCharacterElements.movementDirection.x = vectorX * pidCharacterSpeed ;
                 }
             });
             leftNipple.on('end', () => {
-                console.log("Left joystick end. Resetting input.");
+                // console.log("Left joystick end. Resetting input.");
                 if (controlledBotIndex !== -1) {
                     userInput.forward = 0;
                     userInput.strafe = 0;
@@ -1654,18 +1655,17 @@
                  if (data.angle && typeof data.force === 'number' && data.force > 0.01) { // Added small threshold
                     vectorX = data.force * Math.cos(data.angle.radian);
                     vectorY = data.force * Math.sin(data.angle.radian);
-                    console.log("Right joystick calculated - vectorX:", vectorX, "vectorY:", vectorY, "Force:", data.force, "Angle (rad):", data.angle.radian);
+                    // console.log("Right joystick calculated - vectorX:", vectorX, "vectorY:", vectorY, "Force:", data.force, "Angle (rad):", data.angle.radian);
                 } else {
-                     console.log("Right joystick: No/low angle/force data. Raw data:", JSON.stringify(data));
+                    // console.log("Right joystick: No/low angle/force data. Raw data:", JSON.stringify(data));
                 }
 
                 if (typeof vectorX === 'number' && typeof vectorY === 'number' && (controlledBotIndex !== -1 || cameraTargetIsPidCharacter)) { 
                     cameraYaw -= vectorX * cameraRotationSpeed * 2.0; 
-                    cameraPitch -= vectorY * cameraRotationSpeed * 1.5; // Positive Y on joystick = up, so decrease pitch to look up
+                    cameraPitch -= vectorY * cameraRotationSpeed * 1.5; 
                     cameraPitch = Math.max(-Math.PI / 2 + 0.2, Math.min(Math.PI / 2 - 0.2, cameraPitch));
                 }
             });
-            // No specific 'end' action needed for camera joystick as it just stops changing view
         }
 
 
@@ -1773,7 +1773,7 @@
 
             platformTimer += deltaTime;
             
-            const newLinvelY = Math.sin(platformTimer * 1.0) * 35.0; // Changed from 1.5 to 35.0
+            const newLinvelY = Math.sin(platformTimer * 1.0) * 35.0; 
             const newAngvelY = Math.cos(platformTimer * 0.5) * 0.3; 
 
             platformRB.setLinvel({ x: 0.0, y: newLinvelY, z: 0.0 }, true);
@@ -1926,37 +1926,43 @@
 
             const targetVelocity = { x: 0.0, y: 0.0, z: 0.0 }; 
             
-            // PID character movement direction is directly set by keyboard or joystick (for XZ) and GUI (for Y)
             const moveX = pidCharacterElements.movementDirection.x;
             const moveY = pidCharacterElements.movementDirection.y;
             const moveZ = pidCharacterElements.movementDirection.z;
 
             if (moveX === 0.0 && moveY === 0.0 && moveZ === 0.0) {
                 pidController.setAxes(R.PidAxesMask.AllAng); 
-            } else if (moveY === 0.0) { // If no Y input, PID controls XZ linear and all angular
+            } else if (moveY === 0.0) { 
                 pidController.setAxes(R.PidAxesMask.AllAng | R.PidAxesMask.LinX | R.PidAxesMask.LinZ);
-            } else { // If Y input, PID controls all linear and all angular
+            } else { 
                 pidController.setAxes(R.PidAxesMask.All); 
             }
             
             const currentPos = characterRB.translation();
-            const yawQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), cameraYaw);
-            const worldMoveDirection = new THREE.Vector3(moveX, 0, moveZ).applyQuaternion(yawQuaternion);
+            const yawQuaternionTHREE = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), cameraYaw);
+            const worldMoveDirection = new THREE.Vector3(moveX, 0, moveZ).applyQuaternion(yawQuaternionTHREE);
 
             const targetPoint = new R.Vector3(
                 currentPos.x + worldMoveDirection.x,
-                currentPos.y + moveY, // Y is directly applied, not affected by camera yaw
+                currentPos.y + moveY, 
                 currentPos.z + worldMoveDirection.z
             );
 
             pidController.applyLinearCorrection(characterRB, targetPoint, targetVelocity);
             
             // Update target rotation for PID character based on camera yaw
-            // This makes the PID character align with the camera's forward direction
-            const targetQuat = new R.Quaternion();
-            targetQuat.setFromAxisAngle(new R.Vector3(0,1,0), cameraYaw);
-            pidCharacterElements.targetRotation = targetQuat;
+            const threeTempQuat = new THREE.Quaternion();
+            const yAxis = new THREE.Vector3(0, 1, 0); // THREE.Vector3 for THREE.Quaternion method
+            threeTempQuat.setFromAxisAngle(yAxis, cameraYaw);
 
+            // Create a new RAPIER.Quaternion using the components from the THREE.Quaternion
+            pidCharacterElements.targetRotation = new R.Quaternion(
+                threeTempQuat.x,
+                threeTempQuat.y,
+                threeTempQuat.z,
+                threeTempQuat.w
+            );
+            
             pidController.applyAngularCorrection(characterRB, pidCharacterElements.targetRotation, targetVelocity);
         }
 
@@ -2094,8 +2100,8 @@
             
             // Default/World View
             cameraBoom.position.copy(worldViewCameraLookAt); 
-            cameraBoom.rotation.y = cameraYaw; // Keep current yaw for smooth transition if desired
-            const pitchQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), cameraPitch); // Keep pitch
+            cameraBoom.rotation.y = cameraYaw; 
+            const pitchQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), cameraPitch); 
             camera.quaternion.copy(pitchQuaternion);
             camera.position.copy(worldViewCameraPos); 
             camera.lookAt(cameraBoom.position); 
@@ -2231,7 +2237,7 @@
                             }
                         }
                     }
-                    if (pidCharacterElements.body) { // PID keyboard always active if body exists
+                    if (pidCharacterElements.body) { 
                          switch(event.key) { 
                             case 'ArrowUp': pidCharacterElements.movementDirection.z = pidCharacterSpeed; break;
                             case 'ArrowDown': pidCharacterElements.movementDirection.z = -pidCharacterSpeed; break;
@@ -2256,7 +2262,7 @@
                             }
                         }
                     }
-                    if (pidCharacterElements.body) { // PID keyboard always active
+                    if (pidCharacterElements.body) { 
                         switch(event.key) {
                             case 'ArrowUp': if (pidCharacterElements.movementDirection.z > 0) pidCharacterElements.movementDirection.z = 0; break;
                             case 'ArrowDown': if (pidCharacterElements.movementDirection.z < 0) pidCharacterElements.movementDirection.z = 0; break;
