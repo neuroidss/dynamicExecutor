@@ -1773,7 +1773,7 @@
 
             platformTimer += deltaTime;
             
-            const newLinvelY = Math.sin(platformTimer * 1.0) * 35.0; 
+            const newLinvelY = Math.sin(platformTimer * 1.0) * 20.0; 
             const newAngvelY = Math.cos(platformTimer * 0.5) * 0.3; 
 
             platformRB.setLinvel({ x: 0.0, y: newLinvelY, z: 0.0 }, true);
