@@ -1,0 +1,2225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Rapier3D - Bot Control Demo</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #292929; color: white; touch-action: none; /* Prevent default touch actions like scroll/zoom */ }
+        canvas { display: block; cursor: grab; }
+        #gui-container { position: absolute; top: 10px; right: 10px; z-index: 100;}
+        #stats-container { position: absolute; top: 10px; left: 10px; z-index: 100;}
+        #info { position: absolute; bottom: 10px; left: 10px; font-family: Arial, sans-serif; font-size: 14px; z-index: 100;}
+        #crosshair {
+            position: fixed;
+            left: 50%;
+            top: 50%;
+            width: 2px;
+            height: 2px;
+            background-color: white;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            display: none;
+            z-index: 100;
+        }
+        .nipple-zone {
+            position: absolute;
+            width: 150px; /* Adjust size as needed */
+            height: 150px; /* Adjust size as needed */
+            opacity: 0.5; /* Make zones slightly visible for debugging, can be 0 */
+            /* background-color: rgba(128,128,128,0.2); */ /* Optional: for debugging zone */
+            z-index: 150; /* Ensure joysticks are above other elements if needed */
+        }
+        #joystick-zone-left {
+            bottom: 30px;
+            left: 30px;
+        }
+        #joystick-zone-right {
+            bottom: 30px;
+            right: 30px;
+        }
+    </style>
+</head>
+<body>
+    <div id="gui-container"></div>
+    <div id="stats-container"></div>
+    <div id="info">
+        Select a bot to control from the GUI. Use W,A,S,D or Left Joystick to move. Use Mouse or Right Joystick to look. Space or GUI Button to Jump.<br/>
+        PID Character: Arrow Keys (XZ), PageUp/PageDown (Y). Mouse to orbit camera. Sensor events logged to console.
+    </div>
+    <div id="crosshair"></div>
+
+    <!-- Joystick Zones -->
+    <div id="joystick-zone-left" class="nipple-zone"></div>
+    <div id="joystick-zone-right" class="nipple-zone"></div>
+
+    <script src="https://yoannmoinet.github.io/nipplejs/javascripts/nipplejs.js"></script>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/seedrandom/3.0.5/seedrandom.min.js"></script>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/",
+            "rapier3d-compat": "https://cdn.skypack.dev/@dimforge/rapier3d-compat",
+            "lil-gui": "https://unpkg.com/lil-gui@0.19.1/dist/lil-gui.esm.js",
+            "stats.js": "https://unpkg.com/three@0.164.1/examples/jsm/libs/stats.module.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import RAPIER_MODULE from 'rapier3d-compat';
+        import GUI from 'lil-gui';
+        import Stats from 'stats.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        let R;
+        let scene, camera, renderer;
+        let world, physicsLines, eventQueue; // Added eventQueue
+        let stats;
+        let gui;
+
+        let bots = [];
+        const botCount = 3;
+        const botRadius = 0.5;
+        const controllerOffset = 0.05;
+
+
+        let activeBotCharacterController = null;
+        let controlledBotIndex = -1;
+        let cameraTargetIsPidCharacter = false;
+
+
+        const userInput = {
+            forward: 0,
+            strafe: 0,
+            attemptingJump: false,
+        };
+        
+        const botMaxMoveSpeed = 4.5;
+        const botGroundAcceleration = 35.0;
+        const botAirAcceleration = 6.0;
+        const botGroundDamping = 25.0;
+        const botAirDamping = 1.0;
+        const botJumpForce = 7.5;
+        const worldGravity = 28.0;
+
+        let controlledBotState = {
+            onGround: false,
+            worldVelocityY: 0.0,
+            targetHorizontalVelocity: new THREE.Vector3(),
+            currentHorizontalVelocity: new THREE.Vector3(),
+            originalBodyType: null,
+            isOnMovingPlatform: false,
+        };
+
+
+        let movingPlatformBody;
+        let platformTimer = 0.0; 
+        let platformWorldVelocity = new THREE.Vector3();
+        let platformDisplacementForFrame;
+
+
+        const params = {
+            running: true,
+            restartDemo: () => {
+                if (R) initDemo(); else console.error("Rapier not initialized yet for restart.");
+            },
+            jumpControlledBot: () => { 
+                 if (controlledBotIndex !== -1 && controlledBotState.onGround && !userInput.attemptingJump) {
+                    userInput.attemptingJump = true;
+                 }
+            },
+            selectedBotName: "None",
+        };
+
+        const tempWorldDirection = new THREE.Vector3();
+        const tempRightDirection = new THREE.Vector3();
+
+        let cameraBoom;
+        const cameraDistance = 5.5;
+        const cameraPivotOffsetY = 1.0; 
+        let cameraYaw = Math.PI;
+        let cameraPitch = 0.15;
+        const cameraRotationSpeed = 0.03; 
+
+        let prismaticDemoElements = { bodies: [], joint: null };
+        let collisionGroupsDemoElements = { bodies: [] };
+        let lockedAxesDemoElements = { bodies: [] };
+        let pendulumElements = { bodies: [], joint: null };
+        let kevaTowerElements = { bodies: [] };
+        let fountainElements = { bodies: [], spawnInterval: 5, currentSpawnTick: 0, maxBodies: 150, spawnPos: null };
+        let sphericalJointDemoElements = { bodies: [], joints: [] }; 
+        let ccdDemoElements = { bodies: [], walls: [] }; 
+        let groundBody = null;
+        let fixedJointDemoElements = { bodies: [], joint: null }; 
+
+        // New demo elements
+        let glbConvexHullDemoElements = { models: [], bodies: [] }; 
+        let dampingDemoElements = { bodies: [] };
+        let voxelPlatformElements = { bodies: [] };
+        let convexPolyhedraElements = { bodies: [] };
+        let motoredRevoluteJointElements = { bodies: [], joint: null };
+
+        // Elements for newly added demos
+        let stackedOnHeightfieldDemoElements = { bodies: [] };
+        let stackedOnPlatformDemoElements = { bodies: [] };
+        let revoluteJointsGridDemoElements = { bodies: [], joints: [] };
+        let ballJointsGridDemoElements = { bodies: [], joints: [] };
+        let staticTrimeshDemoElements = { bodies: [] };
+        let glbTrimeshDemoElements = { models: [], bodies: [] };
+        let characterControllerDemoCubesElements = { bodies: [] };
+
+        // PID Character Elements
+        let pidCharacterElements = { 
+            body: null, 
+            collider: null, 
+            controller: null, 
+            movementDirection: { x: 0.0, y: 0.0, z: 0.0 }, // This will store direct input
+            targetRotation: null 
+        };
+        const pidCharacterSpeed = 0.25; // Displacement per input action for PID target
+
+        // Demo elements for newly added features
+        let roundShapesDemoElements = { bodies: [] };
+        let sensorDemoElements = { sensorBody: null, sensorCollider: null, dynamicBodies: [] };
+        let dominanceDemoElements = { bodies: [] };
+
+
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        const worldViewCameraPos = new THREE.Vector3(0, 20, 35);
+        const worldViewCameraLookAt = new THREE.Vector3(0, 0, 0);
+
+
+        async function main() {
+            await RAPIER_MODULE.init();
+            R = RAPIER_MODULE;
+
+            platformDisplacementForFrame = new R.Vector3(0,0,0);
+            pidCharacterElements.targetRotation = new R.Quaternion(0.0, 0.0, 0.0, 1.0);
+            eventQueue = new R.EventQueue(true); // Initialize event queue
+
+
+            initGraphics();
+            initGUI();
+            initDemo();
+            setupInputListeners(); 
+            animate();
+        }
+
+        function onWindowResize() {
+            if (camera && renderer) {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            }
+        }
+
+        function initGraphics() {
+            scene = new THREE.Scene();
+
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1000);
+            cameraBoom = new THREE.Object3D(); 
+            scene.add(cameraBoom);
+            cameraBoom.add(camera); 
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0x707070);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+            dirLight.position.set(15, 20, 10);
+            dirLight.castShadow = true; 
+            scene.add(dirLight);
+
+            const lineMaterial = new THREE.LineBasicMaterial({ vertexColors: true });
+            const lineGeometry = new THREE.BufferGeometry();
+            physicsLines = new THREE.LineSegments(lineGeometry, lineMaterial);
+            scene.add(physicsLines);
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function initGUI() {
+            stats = new Stats();
+            document.getElementById('stats-container').appendChild(stats.dom);
+
+            gui = new GUI({ container: document.getElementById('gui-container') });
+            gui.add(params, 'running').name('Run Simulation');
+            
+            const botNames = ["None", ...Array.from({length: botCount}, (_, i) => `Bot ${i + 1}`), "PID Character"];
+            gui.add(params, 'selectedBotName', botNames).name('Control View').onChange(selectBotToControl);
+            
+            gui.add(params, 'jumpControlledBot').name('Jump Bot (if Bot selected)');
+            gui.add(params, 'restartDemo').name('Restart Demo');
+            
+            if (isMobile) {
+                 document.getElementById('info').style.display = 'none'; 
+            }
+        }
+        
+        function selectBotToControl(selectedName) {
+            // Reset previous controlled bot if any
+            if (controlledBotIndex !== -1 && bots[controlledBotIndex] && bots[controlledBotIndex].rigidBody) {
+                if (world && world.getRigidBody(bots[controlledBotIndex].rigidBody.handle)) {
+                    bots[controlledBotIndex].rigidBody.setBodyType(bots[controlledBotIndex].originalBodyType || R.RigidBodyType.Dynamic, true);
+                    bots[controlledBotIndex].rigidBody.setLinvel(new R.Vector3(0,0,0), true);
+                    bots[controlledBotIndex].rigidBody.setAngvel(new R.Vector3(0,0,0), true);
+                }
+            }
+
+            // Reset camera target state
+            cameraTargetIsPidCharacter = false;
+            controlledBotIndex = -1;
+
+            if (selectedName === "PID Character") {
+                cameraTargetIsPidCharacter = true;
+                // Reset bot-specific control state
+                controlledBotState.worldVelocityY = 0.0;
+                controlledBotState.targetHorizontalVelocity.set(0,0,0);
+                controlledBotState.currentHorizontalVelocity.set(0,0,0);
+                controlledBotState.onGround = false; 
+                controlledBotState.isOnMovingPlatform = false;
+                userInput.attemptingJump = false;
+
+            } else if (selectedName !== "None") {
+                const newControlledBotIndex = parseInt(selectedName.split(" ")[1]) - 1;
+                if (newControlledBotIndex >= 0 && newControlledBotIndex < bots.length) {
+                    controlledBotIndex = newControlledBotIndex;
+                    const botToControl = bots[controlledBotIndex];
+                    if (botToControl && botToControl.rigidBody && world && world.getRigidBody(botToControl.rigidBody.handle)) {
+                        botToControl.originalBodyType = botToControl.rigidBody.bodyType();
+                        botToControl.rigidBody.setBodyType(R.RigidBodyType.KinematicPositionBased, true);
+
+                        controlledBotState.worldVelocityY = 0.0;
+                        controlledBotState.targetHorizontalVelocity.set(0,0,0);
+                        controlledBotState.currentHorizontalVelocity.set(0,0,0);
+                        controlledBotState.onGround = false; 
+                        controlledBotState.isOnMovingPlatform = false;
+                        userInput.attemptingJump = false;
+                    } else {
+                        console.warn(`Bot ${controlledBotIndex} not found or its rigidBody is invalid.`);
+                        controlledBotIndex = -1; 
+                    }
+                }
+            }
+            // Else: "None" is selected, controlledBotIndex remains -1, cameraTargetIsPidCharacter remains false
+
+            if (!isMobile) {
+                if (controlledBotIndex !== -1 || cameraTargetIsPidCharacter) {
+                    if (document.pointerLockElement !== renderer.domElement) {
+                        renderer.domElement.requestPointerLock();
+                    }
+                } else {
+                    if (document.pointerLockElement === renderer.domElement) {
+                        document.exitPointerLock();
+                    }
+                }
+            }
+        }
+
+
+        function cleanupPhysics() {
+            if (world) {
+                bots.forEach(bot => {
+                    if (bot.rigidBody && world.getRigidBody(bot.rigidBody.handle)) {
+                        world.removeRigidBody(world.getRigidBody(bot.rigidBody.handle));
+                    }
+                });
+                bots = [];
+
+                if (activeBotCharacterController) {
+                    try { world.removeCharacterController(activeBotCharacterController); }
+                    catch (e) { console.warn("Could not remove active bot character controller", e); }
+                    activeBotCharacterController = null;
+                }
+                controlledBotIndex = -1;
+                cameraTargetIsPidCharacter = false;
+
+
+                // PID Character Cleanup
+                if (pidCharacterElements.controller) { 
+                    try {
+                         if (world && typeof world.removePidController === 'function') { 
+                            world.removePidController(pidCharacterElements.controller);
+                         }
+                    } catch (e) {
+                        console.warn("Error during PID controller removal:", e);
+                    }
+                }
+                pidCharacterElements = { 
+                    body: null, 
+                    collider: null, 
+                    controller: null, 
+                    movementDirection: { x: 0.0, y: 0.0, z: 0.0 }, 
+                    targetRotation: pidCharacterElements.targetRotation || (R ? new R.Quaternion(0,0,0,1) : null) 
+                };
+
+
+                if (movingPlatformBody && world.getRigidBody(movingPlatformBody.handle)) {
+                    world.removeRigidBody(world.getRigidBody(movingPlatformBody.handle));
+                }
+                movingPlatformBody = null;
+                
+                if (groundBody && world.getRigidBody(groundBody.handle)) {
+                    world.removeRigidBody(world.getRigidBody(groundBody.handle));
+                }
+                groundBody = null;
+
+                pendulumElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                pendulumElements = { bodies: [], joint: null };
+
+                prismaticDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                 if (prismaticDemoElements.joint && world.getImpulseJoint(prismaticDemoElements.joint.handle)) { 
+                    world.removeImpulseJoint(prismaticDemoElements.joint, true);
+                 }
+                prismaticDemoElements = { bodies: [], joint: null };
+
+                collisionGroupsDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                collisionGroupsDemoElements = { bodies: [] };
+
+                lockedAxesDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                lockedAxesDemoElements = { bodies: [] };
+
+                kevaTowerElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                kevaTowerElements = { bodies: [] };
+
+                fountainElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                fountainElements = { bodies: [], spawnInterval: 5, currentSpawnTick: 0, maxBodies: 150, spawnPos: null };
+                
+                sphericalJointDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                sphericalJointDemoElements.joints.forEach(joint => {
+                     if (joint && world.getImpulseJoint(joint.handle)) world.removeImpulseJoint(joint, true); 
+                });
+                sphericalJointDemoElements = { bodies: [], joints: [] };
+
+                ccdDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                 ccdDemoElements.walls.forEach(bodyHandle => { 
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                ccdDemoElements = { bodies: [], walls: [] };
+                
+                fixedJointDemoElements.bodies.forEach(bodyHandle => { 
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                if (fixedJointDemoElements.joint && world.getImpulseJoint(fixedJointDemoElements.joint.handle)) { 
+                    world.removeImpulseJoint(fixedJointDemoElements.joint, true);
+                }
+                fixedJointDemoElements = { bodies: [], joint: null }; 
+
+
+                // Cleanup for new demos
+                glbConvexHullDemoElements.models.forEach(model => { 
+                    if (model.parent === scene) scene.remove(model);
+                });
+                glbConvexHullDemoElements.bodies.forEach(bodyHandle => { 
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                glbConvexHullDemoElements = { models: [], bodies: [] }; 
+
+                dampingDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                dampingDemoElements = { bodies: [] };
+
+                voxelPlatformElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                voxelPlatformElements = { bodies: [] };
+
+                convexPolyhedraElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                convexPolyhedraElements = { bodies: [] };
+
+                motoredRevoluteJointElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle);
+                    if (body) world.removeRigidBody(body);
+                });
+                if (motoredRevoluteJointElements.joint && world.getImpulseJoint(motoredRevoluteJointElements.joint.handle)) {
+                    world.removeImpulseJoint(motoredRevoluteJointElements.joint, true);
+                }
+                motoredRevoluteJointElements = { bodies: [], joint: null };
+
+
+                // Cleanup for newly added demos
+                stackedOnHeightfieldDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle); if (body) world.removeRigidBody(body);
+                });
+                stackedOnHeightfieldDemoElements = { bodies: [] };
+
+                stackedOnPlatformDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle); if (body) world.removeRigidBody(body);
+                });
+                stackedOnPlatformDemoElements = { bodies: [] };
+
+                revoluteJointsGridDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle); if (body) world.removeRigidBody(body);
+                });
+                revoluteJointsGridDemoElements.joints.forEach(joint => {
+                    if (joint && world.getImpulseJoint(joint.handle)) world.removeImpulseJoint(joint, true);
+                });
+                revoluteJointsGridDemoElements = { bodies: [], joints: [] };
+
+                ballJointsGridDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle); if (body) world.removeRigidBody(body);
+                });
+                ballJointsGridDemoElements.joints.forEach(joint => {
+                     if (joint && world.getImpulseJoint(joint.handle)) world.removeImpulseJoint(joint, true);
+                });
+                ballJointsGridDemoElements = { bodies: [], joints: [] };
+
+                staticTrimeshDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle); if (body) world.removeRigidBody(body);
+                });
+                staticTrimeshDemoElements = { bodies: [] };
+                
+                glbTrimeshDemoElements.models.forEach(model => {
+                     if (model.parent === scene) scene.remove(model);
+                });
+                glbTrimeshDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle); if (body) world.removeRigidBody(body);
+                });
+                glbTrimeshDemoElements = { models: [], bodies: [] };
+
+                characterControllerDemoCubesElements.bodies.forEach(bodyHandle => {
+                     const body = world.getRigidBody(bodyHandle); if (body) world.removeRigidBody(body);
+                });
+                characterControllerDemoCubesElements = { bodies: [] };
+
+                // Cleanup for features added in this step
+                roundShapesDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle); if (body) world.removeRigidBody(body);
+                });
+                roundShapesDemoElements = { bodies: [] };
+
+                if (sensorDemoElements.sensorBody && world.getRigidBody(sensorDemoElements.sensorBody.handle)) {
+                    world.removeRigidBody(sensorDemoElements.sensorBody);
+                }
+                sensorDemoElements.dynamicBodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle); if (body) world.removeRigidBody(body);
+                });
+                sensorDemoElements = { sensorBody: null, sensorCollider: null, dynamicBodies: [] };
+
+                dominanceDemoElements.bodies.forEach(bodyHandle => {
+                    const body = world.getRigidBody(bodyHandle); if (body) world.removeRigidBody(body);
+                });
+                dominanceDemoElements = { bodies: [] };
+
+
+                world = null; 
+            }
+        }
+        
+        function generateHeightfield(nsubdivs, scaleFactor) {
+            let heights = [];
+            var rng = new Math.seedrandom('heightfield_demo_seed'); 
+        
+            for (let i = 0; i <= nsubdivs; ++i) {
+                for (let j = 0; j <= nsubdivs; ++j) {
+                    let x = i / nsubdivs * Math.PI * 4; 
+                    let y = j / nsubdivs * Math.PI * 4;
+                    heights.push((Math.sin(x) * Math.cos(y) + Math.sin(y*0.5) * 0.5) * scaleFactor * 0.4 + (rng()-0.5) * scaleFactor * 0.1);
+                }
+            }
+            return new Float32Array(heights);
+        }
+
+        function generateTriMesh(RAPIER_API_UNUSED, nsubdivs, wx, wy, wz) {
+            let vertices = [];
+            let indices = [];
+
+            let elementWidth = 1.0 / nsubdivs;
+            var rng = new Math.seedrandom('trimesh_platform_seed');
+
+            let i, j;
+            for (i = 0; i <= nsubdivs; ++i) {
+                for (j = 0; j <= nsubdivs; ++j) {
+                    let x = (j * elementWidth - 0.5) * wx;
+                    let yPos = rng() * wy; 
+                    let z = (i * elementWidth - 0.5) * wz;
+                    vertices.push(x, yPos, z);
+                }
+            }
+
+            for (i = 0; i < nsubdivs; ++i) {
+                for (j = 0; j < nsubdivs; ++j) {
+                    let i1 = (i + 0) * (nsubdivs + 1) + (j + 0);
+                    let i2 = (i + 0) * (nsubdivs + 1) + (j + 1);
+                    let i3 = (i + 1) * (nsubdivs + 1) + (j + 0);
+                    let i4 = (i + 1) * (nsubdivs + 1) + (j + 1);
+
+                    indices.push(i1, i3, i2);
+                    indices.push(i3, i4, i2);
+                }
+            }
+            return {
+                vertices: new Float32Array(vertices),
+                indices: new Uint32Array(indices),
+            };
+        }
+
+
+        function createPrismaticJointDemo(currentWorld, currentR, x, y, z) {
+            let trackBodyDesc = currentR.RigidBodyDesc.fixed()
+                .setTranslation(x, y, z);
+            let trackBody = currentWorld.createRigidBody(trackBodyDesc);
+            let trackColliderDesc = currentR.ColliderDesc.cuboid(0.2, 0.2, 2.5);
+            currentWorld.createCollider(trackColliderDesc, trackBody);
+            prismaticDemoElements.bodies.push(trackBody.handle);
+
+            let sliderBodyDesc = currentR.RigidBodyDesc.dynamic()
+                .setTranslation(x, y, z - 1.0);
+            let sliderBody = currentWorld.createRigidBody(sliderBodyDesc);
+            let sliderColliderDesc = currentR.ColliderDesc.cuboid(0.3, 0.3, 0.3).setDensity(2.0).setFriction(0.1);
+            currentWorld.createCollider(sliderColliderDesc, sliderBody);
+            prismaticDemoElements.bodies.push(sliderBody.handle);
+
+            let jointAnchor1 = new currentR.Vector3(0.0, 0.0, 0.0);
+            let jointAnchor2 = new currentR.Vector3(0.0, 0.0, 0.0);
+            let jointAxis = new currentR.Vector3(0.0, 0.0, 1.0);
+
+            let prismaticJointParams = currentR.JointData.prismatic(jointAnchor1, jointAnchor2, jointAxis);
+            prismaticJointParams.limitsEnabled = true;
+            prismaticJointParams.limits = [-2.0, 2.0];
+
+            let joint = currentWorld.createImpulseJoint(prismaticJointParams, trackBody, sliderBody, true);
+            prismaticDemoElements.joint = joint; 
+
+            if (joint && typeof joint.configureMotorVelocity === 'function') {
+                joint.configureMotorVelocity(1.5, 0.2); 
+            }
+        }
+
+        function createCollisionGroupsDemo(currentWorld, currentR, x, y, z) {
+            const group1Membership = 0x0001;
+            const group1Filter = 0x0001; 
+            const group1ColliderSetup = (group1Membership << 16) | group1Filter;
+
+            const group2Membership = 0x0002;
+            const group2Filter = 0x0002; 
+            const group2ColliderSetup = (group2Membership << 16) | group2Filter;
+
+            let p1Desc = currentR.RigidBodyDesc.fixed().setTranslation(x - 2.0, y, z);
+            let p1Body = currentWorld.createRigidBody(p1Desc);
+            let p1Collider = currentR.ColliderDesc.cuboid(1.5, 0.1, 1.5)
+                .setCollisionGroups(group1ColliderSetup);
+            currentWorld.createCollider(p1Collider, p1Body);
+            collisionGroupsDemoElements.bodies.push(p1Body.handle);
+
+            let p2Desc = currentR.RigidBodyDesc.fixed().setTranslation(x + 2.0, y, z);
+            let p2Body = currentWorld.createRigidBody(p2Desc);
+            let p2Collider = currentR.ColliderDesc.cuboid(1.5, 0.1, 1.5)
+                .setCollisionGroups(group2ColliderSetup);
+            currentWorld.createCollider(p2Collider, p2Body);
+            collisionGroupsDemoElements.bodies.push(p2Body.handle);
+
+            for (let i = 0; i < 3; i++) {
+                let s1Desc = currentR.RigidBodyDesc.dynamic()
+                    .setTranslation(x - 2.0, y + 1.0 + i * 0.6, z);
+                let s1Body = currentWorld.createRigidBody(s1Desc);
+                let s1Collider = currentR.ColliderDesc.ball(0.2)
+                    .setDensity(1.0)
+                    .setCollisionGroups(group1ColliderSetup); 
+                currentWorld.createCollider(s1Collider, s1Body);
+                collisionGroupsDemoElements.bodies.push(s1Body.handle);
+            }
+
+            for (let i = 0; i < 3; i++) {
+                let s2Desc = currentR.RigidBodyDesc.dynamic()
+                    .setTranslation(x + 2.0, y + 1.0 + i * 0.6, z);
+                let s2Body = currentWorld.createRigidBody(s2Desc);
+                let s2Collider = currentR.ColliderDesc.ball(0.2)
+                    .setDensity(1.0)
+                    .setCollisionGroups(group2ColliderSetup); 
+                currentWorld.createCollider(s2Collider, s2Body);
+                collisionGroupsDemoElements.bodies.push(s2Body.handle);
+            }
+        }
+
+        function createLockedAxesDemo(currentWorld, currentR, x, y, z) {
+            let lockedRotXDesc = currentR.RigidBodyDesc.dynamic()
+                .setTranslation(x - 1.5, y, z)
+                .lockTranslations() 
+                .enabledRotations(true, false, false); 
+            let lockedRotXBody = currentWorld.createRigidBody(lockedRotXDesc);
+            let lockedRotXCollider = currentR.ColliderDesc.cuboid(0.2, 0.8, 0.2).setDensity(1.0); 
+            currentWorld.createCollider(lockedRotXCollider, lockedRotXBody);
+            lockedRotXBody.applyTorqueImpulse(new currentR.Vector3(10.0, 0.0, 0.0), true); 
+            lockedAxesDemoElements.bodies.push(lockedRotXBody.handle);
+
+            let noRotDesc = currentR.RigidBodyDesc.dynamic()
+                .setTranslation(x + 1.5, y, z)
+                .lockRotations(); 
+            let noRotBody = currentWorld.createRigidBody(noRotDesc);
+            let noRotCollider = currentR.ColliderDesc.cylinder(0.6, 0.4).setDensity(1.0); 
+            currentWorld.createCollider(noRotCollider, noRotBody);
+            noRotBody.applyImpulse(new currentR.Vector3(0, 0, 5.0), true); 
+            lockedAxesDemoElements.bodies.push(noRotBody.handle);
+        }
+
+        function createKevaTower(currentWorld, currentR, baseX, baseY, baseZ) {
+            let halfExtents = new currentR.Vector3(0.1, 0.5, 2.0); 
+            let blockHeightOffset = baseY; 
+            const numyArr = [0, 3, 5, 5, 7, 9]; 
+
+            function buildKevaBlockLayer(world, RAPIER, hExts, layerShift, numx, numy, numz) {
+                let half_extents_zyx = { x: hExts.z, y: hExts.y, z: hExts.x }; 
+                let dimensions = [hExts, half_extents_zyx]; 
+
+                for (let i = 0; i < numy; ++i) { 
+                    let dim = dimensions[i % 2]; 
+                    let yPos = dim.y * i * 2.0 + dim.y + layerShift.y; 
+
+                    let currentLayerNumX = (i % 2 === 0) ? numx : numz;
+                    let currentLayerNumZ = (i % 2 === 0) ? numz : numx;
+                     let spacing = (currentLayerNumX > 1) ? (dim.z * currentLayerNumX - dim.x) / (currentLayerNumZ - 1.0) : 0;
+                     if (currentLayerNumZ <= 1) spacing = 0;
+
+
+                    for (let j = 0; j < currentLayerNumX; ++j) { 
+                        for (let k = 0; k < currentLayerNumZ; ++k) { 
+                            
+                            let kevaX, kevaZ;
+                            let kevaDim = dimensions[i % 2];
+                            let kevaOuterDim = (i % 2 == 0) ? numx : numz; 
+                            let kevaInnerDim = (i % 2 == 0) ? numz : numx; 
+                            let kevaSpacing = (kevaDim.z * kevaOuterDim - kevaDim.x) / (kevaInnerDim -1.0);
+                            if (kevaInnerDim <= 1) kevaSpacing = 0.0;
+
+
+                            kevaX = (i % 2 == 0) ? ( (kevaInnerDim > 1) ? kevaSpacing * k * 2.0 : 0) + kevaDim.x + layerShift.x : kevaDim.x * j * 2.0 + kevaDim.x + layerShift.x;
+                            kevaZ = (i % 2 == 0) ? kevaDim.z * j * 2.0 + kevaDim.z + layerShift.z : ( (kevaOuterDim > 1) ? kevaSpacing * k * 2.0 : 0) + kevaDim.z + layerShift.z;
+
+                            let bodyDesc = RAPIER.RigidBodyDesc.dynamic().setTranslation(kevaX, yPos, kevaZ);
+                            let body = world.createRigidBody(bodyDesc);
+                            let colliderDesc = RAPIER.ColliderDesc.cuboid(kevaDim.x, kevaDim.y, kevaDim.z).setDensity(0.5).setFriction(0.7);
+                            world.createCollider(colliderDesc, body);
+                            kevaTowerElements.bodies.push(body.handle);
+                        }
+                    }
+                }
+                return 2.0 * hExts.y * numy; 
+            }
+            
+            for (let level = 5; level >= 1; --level) {
+                let numxAtLevel = level; 
+                let numyLayers = numyArr[level]; 
+                let numzAtLevel = numxAtLevel * 2 + 1; 
+
+                let blockWidth = numxAtLevel * halfExtents.z * 2.0; 
+                
+                const segmentHeight = buildKevaBlockLayer(
+                    currentWorld, currentR, halfExtents,
+                    new currentR.Vector3(baseX - blockWidth / 2.0, blockHeightOffset, baseZ - blockWidth / 2.0), 
+                    numxAtLevel, numyLayers, numzAtLevel 
+                );
+                blockHeightOffset += segmentHeight; 
+                if (numyLayers > 0) blockHeightOffset += halfExtents.x * 2.0; 
+            }
+        }
+
+        function createFountainDemo(currentWorld, currentR, x, y, z) {
+            fountainElements.currentSpawnTick = 0; 
+            fountainElements.spawnPos = {x, y, z};
+        }
+        
+        function updateFountain(currentWorld, currentR) {
+            if (!fountainElements.spawnPos || !world || !R) return; 
+
+            fountainElements.currentSpawnTick++;
+            if (fountainElements.currentSpawnTick % fountainElements.spawnInterval !== 0) {
+                return;
+            }
+
+            const x = fountainElements.spawnPos.x;
+            const y = fountainElements.spawnPos.y;
+            const z = fountainElements.spawnPos.z;
+            const rad = 0.3;
+
+            let bodyDesc = currentR.RigidBodyDesc.dynamic()
+                .setLinvel( (Math.random() - 0.5) * 5.0, 7.0 + Math.random() * 5.0, (Math.random() - 0.5) * 5.0)
+                .setTranslation(x + (Math.random()-0.5)*0.5, y, z + (Math.random()-0.5)*0.5); 
+            let colliderDesc;
+
+            switch (Math.floor(Math.random() * 4)) {
+                case 0: colliderDesc = currentR.ColliderDesc.cuboid(rad, rad, rad); break;
+                case 1: colliderDesc = currentR.ColliderDesc.ball(rad); break;
+                case 2: colliderDesc = currentR.ColliderDesc.roundCylinder(rad, rad, rad / 10.0); break; 
+                case 3: colliderDesc = currentR.ColliderDesc.cone(rad, rad); break; 
+            }
+            colliderDesc.setDensity(1.5).setRestitution(0.3).setFriction(0.5);
+
+            let body = currentWorld.createRigidBody(bodyDesc);
+            currentWorld.createCollider(colliderDesc, body);
+            fountainElements.bodies.push(body.handle);
+
+            if (fountainElements.bodies.length > fountainElements.maxBodies) {
+                let oldestBodyHandle = fountainElements.bodies.shift();
+                let oldestBody = currentWorld.getRigidBody(oldestBodyHandle);
+                if (oldestBody) {
+                    currentWorld.removeRigidBody(oldestBody);
+                }
+            }
+        }
+        
+        function createSphericalJointsDemo(currentWorld, currentR, baseX, baseY, baseZ) {
+            const numLinks = 4; 
+            const linkLength = 1.0; 
+            const rad = 0.3;    
+            let prevBody = null;
+
+            let anchorBodyDesc = currentR.RigidBodyDesc.fixed().setTranslation(baseX, baseY + linkLength * 0.5, baseZ);
+            prevBody = currentWorld.createRigidBody(anchorBodyDesc);
+            let anchorColliderDesc = currentR.ColliderDesc.ball(rad * 0.5); 
+            currentWorld.createCollider(anchorColliderDesc, prevBody);
+            sphericalJointDemoElements.bodies.push(prevBody.handle);
+
+            for (let i = 0; i < numLinks; ++i) {
+                let yPos = baseY + linkLength * 0.5 - (i + 1) * linkLength;
+                let bodyDesc = currentR.RigidBodyDesc.dynamic().setTranslation(baseX, yPos, baseZ);
+                let body = currentWorld.createRigidBody(bodyDesc);
+                
+                let colliderDesc = currentR.ColliderDesc.capsule(linkLength / 2.0 - rad, rad).setDensity(1.0); 
+                currentWorld.createCollider(colliderDesc, body);
+                sphericalJointDemoElements.bodies.push(body.handle);
+
+                let anchor1_y = (i === 0) ? 0.0 : -linkLength / 2.0; 
+                let anchor1 = new currentR.Vector3(0.0, anchor1_y, 0.0);
+                let anchor2 = new currentR.Vector3(0.0, linkLength / 2.0, 0.0); 
+
+
+                let params = currentR.JointData.spherical(anchor1, anchor2);
+                let joint = currentWorld.createImpulseJoint(params, prevBody, body, true);
+                sphericalJointDemoElements.joints.push(joint); 
+
+                prevBody = body;
+            }
+        }
+
+        function createWall_from_ccdTS(currentR, currentWorld, offset, stackHeight) {
+            let shiftY = 1.0;
+            let shiftZ = 2.0; 
+
+            for (let i = 0; i < stackHeight; ++i) {
+                for (let j = i; j < stackHeight; ++j) {
+                    let x = offset.x;
+                    let y = i * shiftY + offset.y;
+                    let z = (i * shiftZ) / 2.0 + (j - i) * shiftZ + offset.z - stackHeight * shiftZ * 0.25; 
+
+                    let bodyDesc = currentR.RigidBodyDesc.dynamic().setTranslation(x, y, z);
+                    let body = currentWorld.createRigidBody(bodyDesc);
+                    let colliderDesc = currentR.ColliderDesc.cuboid(0.5, 0.5, 1.0).setDensity(0.8).setFriction(0.8);
+                    currentWorld.createCollider(colliderDesc, body);
+                    ccdDemoElements.walls.push(body.handle); 
+                }
+            }
+        }
+        
+        function createCCDDemo(currentWorld, currentR, baseX, baseY, baseZ) {
+            let numX = 1; 
+            let numZ_stackHeight = 4; 
+            let shiftY_offset = baseY + 0.5; 
+
+            for (let i = 0; i < numX; ++i) {
+                let x = baseX + i * 6.0; 
+                createWall_from_ccdTS(currentR, currentWorld, { x: x, y: shiftY_offset, z: baseZ }, numZ_stackHeight);
+            }
+
+            let projBodyDesc = currentR.RigidBodyDesc.dynamic()
+                .setTranslation(baseX - 15.0, shiftY_offset + 1.0, baseZ) 
+                .setLinvel(350.0, 0.0, 0.0) 
+                .setCcdEnabled(true);
+            let projBody = currentWorld.createRigidBody(projBodyDesc);
+            let projColliderDesc = currentR.ColliderDesc.ball(0.5).setDensity(10.0); 
+            currentWorld.createCollider(projColliderDesc, projBody);
+            ccdDemoElements.bodies.push(projBody.handle);
+        }
+
+        function createFixedJointDemo(currentWorld, currentR, x, y, z) {
+            if (!R || !world) return;
+
+            let body1Desc = currentR.RigidBodyDesc.dynamic()
+                .setTranslation(x, y, z);
+            let body1 = currentWorld.createRigidBody(body1Desc);
+            let collider1Desc = currentR.ColliderDesc.cuboid(0.5, 0.5, 0.5).setDensity(1.0);
+            currentWorld.createCollider(collider1Desc, body1);
+            fixedJointDemoElements.bodies.push(body1.handle);
+            body1.applyImpulse(new currentR.Vector3(0, 5, 5), true); 
+
+            let body2Desc = currentR.RigidBodyDesc.dynamic()
+                .setTranslation(x + 1.0, y, z); 
+            let body2 = currentWorld.createRigidBody(body2Desc);
+            let collider2Desc = currentR.ColliderDesc.ball(0.3).setDensity(1.0);
+            currentWorld.createCollider(collider2Desc, body2);
+            fixedJointDemoElements.bodies.push(body2.handle);
+            
+            let params = currentR.JointData.fixed(
+                { x: 0.5, y: 0.0, z: 0.0 }, { w: 1.0, x: 0.0, y: 0.0, z: 0.0 }, 
+                { x: -0.3, y: 0.0, z: 0.0 }, { w: 1.0, x: 0.0, y: 0.0, z: 0.0 }  
+            );
+            fixedJointDemoElements.joint = currentWorld.createImpulseJoint(params, body1, body2, true);
+        }
+
+
+        function createGLBConvexHullDemo(currentWorld, currentR, threeScene, x, y, z) { 
+            if (!R) return;
+            const loader = new GLTFLoader();
+            loader.load('./suzanne_blender_monkey.glb', (gltf) => {
+                const model = gltf.scene;
+                model.position.set(x, y, z);
+                model.scale.set(1, 1, 1); 
+                threeScene.add(model);
+                glbConvexHullDemoElements.models.push(model); 
+
+                const positions = [];
+                model.traverse((child) => {
+                    if (child.isMesh) {
+                        const geometry = child.geometry;
+                        const positionAttribute = geometry.getAttribute('position');
+                        if (positionAttribute) {
+                            const tempVec = new THREE.Vector3();
+                            for (let i = 0; i < positionAttribute.count; i++) {
+                                tempVec.fromBufferAttribute(positionAttribute, i);
+                                child.localToWorld(tempVec); 
+                                model.worldToLocal(tempVec); 
+                                positions.push(tempVec.x, tempVec.y, tempVec.z);
+                            }
+                        }
+                    }
+                });
+
+                if (positions.length > 0) {
+                    const vertices = new Float32Array(positions);
+                    let bodyDesc = currentR.RigidBodyDesc.dynamic()
+                        .setTranslation(x, y, z)
+                        .setCanSleep(false);
+                    let body = currentWorld.createRigidBody(bodyDesc);
+                    let colliderDesc = currentR.ColliderDesc.convexHull(vertices)
+                        .setDensity(1.0)
+                        .setRestitution(0.5)
+                        .setFriction(0.7);
+                    currentWorld.createCollider(colliderDesc, body);
+                    glbConvexHullDemoElements.bodies.push(body.handle); 
+                    
+                    model.userData.physicsBody = body;
+                } else {
+                    console.warn("GLB model loaded, but no vertices found for physics body.");
+                }
+            }, undefined, (error) => {
+                console.error('Error loading GLB model for convex hull demo:', error);
+            });
+        }
+
+        function createDampingDemo(currentWorld, currentR, baseX, baseY, baseZ) {
+            if (!R) return;
+            const numCubes = 5;
+            const cubeSize = 0.4;
+            const spacing = 1.0;
+
+            for (let i = 0; i < numCubes; i++) {
+                let bodyDesc = currentR.RigidBodyDesc.dynamic()
+                    .setTranslation(baseX + i * spacing, baseY, baseZ)
+                    .setLinvel(0, 0, (i % 2 === 0 ? 5.0 : -5.0)) 
+                    .setAngvel({ x: 0, y: 0, z: (i % 2 === 0 ? 10.0 : -10.0) })
+                    .setLinearDamping(0.1 + i * 0.4) 
+                    .setAngularDamping(0.1 + (numCubes - 1 - i) * 0.4); 
+                let body = currentWorld.createRigidBody(bodyDesc);
+                let colliderDesc = currentR.ColliderDesc.cuboid(cubeSize, cubeSize, cubeSize).setDensity(1.0);
+                currentWorld.createCollider(colliderDesc, body);
+                dampingDemoElements.bodies.push(body.handle);
+            }
+        }
+        
+        function generateDemoVoxels(n, m, o) { 
+            let points = [];
+            var rng = new Math.seedrandom('voxel_platform_seed');
+            for (let i = 0; i < n; ++i) {
+                for (let j = 0; j < m; ++j) {
+                    for (let k = 0; k < o; ++k) {
+                        if (j < m * 0.7 || rng() > 0.3) { 
+                           points.push(i - n / 2.0, j - m / 2.0, k - o / 2.0);
+                        }
+                    }
+                }
+            }
+            return {
+                points: new Float32Array(points),
+                voxelSize: { x: 0.5, y: 0.5, z: 0.5 }, 
+            };
+        }
+
+        function createVoxelPlatformDemo(currentWorld, currentR, x, y, z) {
+            if (!R) return;
+            const voxelsData = generateDemoVoxels(10, 4, 10); 
+            let bodyDesc = currentR.RigidBodyDesc.fixed().setTranslation(x, y, z);
+            let body = currentWorld.createRigidBody(bodyDesc);
+            let colliderDesc = currentR.ColliderDesc.voxels(voxelsData.points, voxelsData.voxelSize)
+                                .setFriction(1.0);
+            currentWorld.createCollider(colliderDesc, body);
+            voxelPlatformElements.bodies.push(body.handle);
+        }
+
+        function createConvexPolyhedraDemo(currentWorld, currentR, baseX, baseY, baseZ) {
+            if (!R) return;
+            const numPolyhedra = 3;
+            const scale = 0.8;
+            const borderRadius = 0.05;
+             var rng = new Math.seedrandom('convex_poly_seed');
+
+            for (let i = 0; i < numPolyhedra; i++) {
+                let vertices = [];
+                for (let l = 0; l < 15; ++l) { 
+                    vertices.push(rng() * scale, rng() * scale, rng() * scale);
+                }
+                let v = new Float32Array(vertices);
+
+                let bodyDesc = currentR.RigidBodyDesc.dynamic()
+                    .setTranslation(baseX + (rng() - 0.5) * 3, baseY + i * (scale + 0.5), baseZ + (rng() - 0.5) * 3);
+                let body = currentWorld.createRigidBody(bodyDesc);
+                let colliderDesc = currentR.ColliderDesc.roundConvexHull(v, borderRadius)
+                                    .setDensity(1.5).setRestitution(0.4);
+                currentWorld.createCollider(colliderDesc, body);
+                convexPolyhedraElements.bodies.push(body.handle);
+            }
+        }
+
+        function createMotoredRevoluteJointDemo(currentWorld, currentR, x, y, z) {
+            if (!R) return;
+            const anchorSize = 0.3;
+            const bladeLength = 2.0;
+            const bladeWidth = 0.2;
+
+            let anchorBodyDesc = currentR.RigidBodyDesc.fixed().setTranslation(x, y, z);
+            let anchorBody = currentWorld.createRigidBody(anchorBodyDesc);
+            let anchorColliderDesc = currentR.ColliderDesc.cuboid(anchorSize, anchorSize, anchorSize);
+            currentWorld.createCollider(anchorColliderDesc, anchorBody);
+            motoredRevoluteJointElements.bodies.push(anchorBody.handle);
+
+            let bladeBodyDesc = currentR.RigidBodyDesc.dynamic().setTranslation(x, y + bladeLength / 2 + anchorSize, z);
+            let bladeBody = currentWorld.createRigidBody(bladeBodyDesc);
+            let bladeColliderDesc = currentR.ColliderDesc.cuboid(bladeWidth / 2, bladeLength / 2, bladeWidth / 2).setDensity(0.5);
+            currentWorld.createCollider(bladeColliderDesc, bladeBody);
+            motoredRevoluteJointElements.bodies.push(bladeBody.handle);
+            
+            let jointAnchor1 = new currentR.Vector3(0.0, 0.0, 0.0); 
+            let jointAnchor2 = new currentR.Vector3(0.0, -bladeLength / 2.0, 0.0); 
+
+
+            let jointAxis = new currentR.Vector3(0.0, 1.0, 0.0); 
+            
+            let revoluteJointParams = currentR.JointData.revolute(jointAnchor1, jointAnchor2, jointAxis);
+            let joint = currentWorld.createImpulseJoint(revoluteJointParams, anchorBody, bladeBody, true);
+            
+            if (joint && typeof joint.configureMotorVelocity === 'function') {
+                joint.configureMotorVelocity(5.0, 0.5); 
+            } 
+            motoredRevoluteJointElements.joint = joint;
+        }
+
+        function addStackedDynamicShapesDemo(currentWorld, currentR, baseX, baseY, baseZ, onMovingPlatform = false) {
+            let num = 3; 
+            let numy = 5; 
+            let rad = 0.4; 
+            let shift = rad * 2.0 + rad * 0.2; 
+            let offset = -num * shift * 0.5 + shift * 0.5; 
+
+            let elementsToTrack = onMovingPlatform ? stackedOnPlatformDemoElements : stackedOnHeightfieldDemoElements;
+
+            for (let j = 0; j < numy; ++j) {
+                for (let i = 0; i < num; ++i) {
+                    for (let k = 0; k < num; ++k) {
+                        let x = i * shift + offset + baseX;
+                        let y = j * shift + baseY + rad + (onMovingPlatform ? 0.6 : 0.1); // Adjust Y to be on top
+                        let z = k * shift + offset + baseZ;
+
+                        let bodyDesc = currentR.RigidBodyDesc.dynamic().setTranslation(x, y, z);
+                        let body = currentWorld.createRigidBody(bodyDesc);
+                        let colliderDesc;
+
+                        switch ((j + i + k) % 4) { 
+                            case 0: colliderDesc = currentR.ColliderDesc.cuboid(rad, rad, rad); break;
+                            case 1: colliderDesc = currentR.ColliderDesc.ball(rad); break;
+                            case 2: colliderDesc = currentR.ColliderDesc.roundCylinder(rad, rad, rad / 10.0); break;
+                            case 3: colliderDesc = currentR.ColliderDesc.cone(rad, rad); break;
+                        }
+                        colliderDesc.setDensity(1.0).setFriction(0.7).setRestitution(0.4);
+                        currentWorld.createCollider(colliderDesc, body);
+                        elementsToTrack.bodies.push(body.handle);
+                    }
+                }
+            }
+        }
+        
+        function createRevoluteJointsGridDemo(currentWorld, currentR, baseX, baseY, baseZ, num) {
+            let rad = 0.3; // Smaller radius for grid elements
+            let shift = 1.5; // Distance between centers of squares in the grid
+
+            let groundBodyDesc = currentR.RigidBodyDesc.fixed().setTranslation(baseX, baseY - rad, baseZ); // Slightly lower anchor for the first parent
+            let currParent = currentWorld.createRigidBody(groundBodyDesc);
+            let anchorColliderDesc = currentR.ColliderDesc.cuboid(rad * 0.5, rad * 0.5, rad * 0.5); // Smaller anchor
+            currentWorld.createCollider(anchorColliderDesc, currParent);
+            revoluteJointsGridDemoElements.bodies.push(currParent.handle);
+            
+            for (let i = 0; i < num; ++i) { // "Layers" or "rows" of the structure along Z
+                let zLayerOffset = baseZ + i * shift * 1.5; // Adjusted spacing
+
+                let segmentBodies = [];
+                let positions = [ // Defines a horizontal segment along X for this layer
+                    new currentR.Vector3(baseX, baseY, zLayerOffset),
+                    new currentR.Vector3(baseX + shift, baseY, zLayerOffset),
+                    new currentR.Vector3(baseX + shift * 2, baseY, zLayerOffset),
+                ];
+                
+                let prevSegmentBody = currParent; // Connect first body of this layer to the overall parent
+
+                for (let k = 0; k < positions.length; ++k) {
+                    let rigidBodyDesc = currentR.RigidBodyDesc.dynamic().setTranslation(
+                        positions[k].x, positions[k].y, positions[k].z
+                    );
+                    let rigidBody = currentWorld.createRigidBody(rigidBodyDesc);
+                    let segmentColliderDesc = currentR.ColliderDesc.capsule(shift/2.5, rad).setDensity(1.0); // Use capsules for links
+                    currentWorld.createCollider(segmentColliderDesc, rigidBody);
+                    segmentBodies.push(rigidBody);
+                    revoluteJointsGridDemoElements.bodies.push(rigidBody.handle);
+
+                    // Connect this body to the previous one in the segment (or to currParent for the first)
+                    let anchor1 = (k === 0 && i === 0) ? new currentR.Vector3(0,0,0) : new currentR.Vector3(-shift/2.0, 0,0); 
+                    let anchor2 = new currentR.Vector3( (k===0 && i > 0) ? 0 : -shift/2.0 ,0,0);
+                    if (k === 0 && i > 0) anchor2 = new currentR.Vector3(0,0, -shift * 0.75); // Connect to previous layer's end
+
+                    let jointAxis = new currentR.Vector3(0.0, 1.0, 0.0); // Revolute around Y axis
+                    let params = currentR.JointData.revolute(anchor1, anchor2, jointAxis);
+                    let joint = currentWorld.createImpulseJoint(params, prevSegmentBody, rigidBody, true);
+                    revoluteJointsGridDemoElements.joints.push(joint);
+                    prevSegmentBody = rigidBody;
+                }
+                currParent = segmentBodies[segmentBodies.length -1]; // Last body of this segment is parent for the next layer's first connection
+            }
+        }
+
+        function createBallJointsGridDemo(currentWorld, currentR, baseX, baseY, baseZ, num) { // num is for nxn grid
+            let rad = 0.3;
+            let shift = 1.0; 
+            let gridBodies = []; 
+
+            for (let k = 0; k < num; ++k) { // z-axis
+                let rowBodies = [];
+                for (let i = 0; i < num; ++i) { // x-axis
+                    let bodyType = (i === 0 && k === 0) ? currentR.RigidBodyType.Fixed : currentR.RigidBodyType.Dynamic;
+                    let bodyDesc = new currentR.RigidBodyDesc(bodyType)
+                        .setTranslation(baseX + i * shift, baseY, baseZ + k * shift);
+                    let body = currentWorld.createRigidBody(bodyDesc);
+                    let colliderDesc = currentR.ColliderDesc.ball(rad).setDensity(1.0);
+                    currentWorld.createCollider(colliderDesc, body);
+                    
+                    rowBodies.push(body);
+                    ballJointsGridDemoElements.bodies.push(body.handle);
+
+                    if (i > 0) { // Connect to previous in row (horizontal)
+                        let parent = rowBodies[i-1];
+                        let params = currentR.JointData.spherical(
+                            new currentR.Vector3(0,0,0), 
+                            new currentR.Vector3(-shift, 0, 0) 
+                        );
+                        let joint = currentWorld.createImpulseJoint(params, parent, body, true);
+                        ballJointsGridDemoElements.joints.push(joint);
+                    }
+                    if (k > 0) { // Connect to previous in column (vertical)
+                        let parent = gridBodies[k-1][i];
+                        let params = currentR.JointData.spherical(
+                            new currentR.Vector3(0,0,0), 
+                            new currentR.Vector3(0, 0, -shift)
+                        );
+                        let joint = currentWorld.createImpulseJoint(params, parent, body, true);
+                        ballJointsGridDemoElements.joints.push(joint);
+                    }
+                }
+                gridBodies.push(rowBodies);
+            }
+        }
+        
+        function createStaticTrimeshAreaDemo(currentWorld, currentR, x, y, z) {
+            let trimeshData = generateTriMesh(R, 15, 15.0, 2.5, 15.0); // nsubdivs, wx, wy, wz
+            let bodyDesc = currentR.RigidBodyDesc.fixed().setTranslation(x, y, z);
+            let body = currentWorld.createRigidBody(bodyDesc);
+            let colliderDesc = currentR.ColliderDesc.trimesh(trimeshData.vertices, trimeshData.indices)
+                .setFriction(0.9);
+            currentWorld.createCollider(colliderDesc, body);
+            staticTrimeshDemoElements.bodies.push(body.handle);
+
+            for (let i = 0; i < 10; i++) { // Add some dynamic objects
+                let dy = y + 3.0 + i * 0.8; 
+                let dx = x + (Math.random() - 0.5) * 6;
+                let dz = z + (Math.random() - 0.5) * 6;
+                let dynBodyDesc = currentR.RigidBodyDesc.dynamic().setTranslation(dx, dy, dz);
+                let dynBody = currentWorld.createRigidBody(dynBodyDesc);
+                let shapeType = Math.floor(Math.random() * 3);
+                let dynColliderDesc;
+                if (shapeType === 0) dynColliderDesc = currentR.ColliderDesc.ball(0.3);
+                else if (shapeType === 1) dynColliderDesc = currentR.ColliderDesc.cuboid(0.25,0.25,0.25);
+                else dynColliderDesc = currentR.ColliderDesc.capsule(0.3, 0.15);
+
+                dynColliderDesc.setDensity(1.2).setRestitution(0.5);
+                currentWorld.createCollider(dynColliderDesc, dynBody);
+                staticTrimeshDemoElements.bodies.push(dynBody.handle);
+            }
+        }
+        
+        function createGLBTrimeshDemo(currentWorld, currentR, threeScene, x, y, z) {
+            if (!R) return;
+            const loader = new GLTFLoader();
+            loader.load('./suzanne_blender_monkey.glb', (gltf) => {
+                const model = gltf.scene;
+                model.position.set(x, y, z);
+                model.scale.set(1.2, 1.2, 1.2); // Slightly larger
+                threeScene.add(model);
+                glbTrimeshDemoElements.models.push(model);
+
+                model.traverse((child) => {
+                    if (child.isMesh) {
+                        const mesh = child;
+                        const geometry = mesh.geometry;
+                        
+                        const verticesAttribute = geometry.attributes.position;
+                        const indicesAttribute = geometry.index;
+
+                        if (verticesAttribute && indicesAttribute) {
+                            const vertices = verticesAttribute.array;
+                            const indices = indicesAttribute.array;
+
+                            const worldVertices = [];
+                            const tempVec = new THREE.Vector3();
+                            const meshToModelMatrix = new THREE.Matrix4();
+                            if (mesh !== model) {
+                                mesh.updateWorldMatrix(true, false); 
+                                const modelInverseMatrixWorld = new THREE.Matrix4();
+                                model.updateWorldMatrix(true, false); 
+                                modelInverseMatrixWorld.copy(model.matrixWorld).invert();
+                                meshToModelMatrix.multiplyMatrices(modelInverseMatrixWorld, mesh.matrixWorld);
+                            } else {
+                                meshToModelMatrix.identity();
+                            }
+
+                            for (let i = 0; i < vertices.length / 3; i++) {
+                                tempVec.set(vertices[i*3], vertices[i*3+1], vertices[i*3+2]);
+                                tempVec.applyMatrix4(meshToModelMatrix); 
+                                worldVertices.push(tempVec.x, tempVec.y, tempVec.z);
+                            }
+                            const rapierVertices = new Float32Array(worldVertices);
+                            const rapierIndices = new Uint32Array(indices);
+
+                            let bodyDesc = currentR.RigidBodyDesc.fixed() 
+                                .setTranslation(x, y, z);
+                            let body = currentWorld.createRigidBody(bodyDesc);
+                            let colliderDesc = currentR.ColliderDesc.trimesh(rapierVertices, rapierIndices)
+                                .setRestitution(0.3)
+                                .setFriction(0.8);
+                            currentWorld.createCollider(colliderDesc, body);
+                            glbTrimeshDemoElements.bodies.push(body.handle);
+                            model.userData.physicsBody = body; 
+                            return; 
+                        }
+                    }
+                });
+                 if (glbTrimeshDemoElements.bodies.length === 0) {
+                    console.warn("GLB model for trimesh demo loaded, but no mesh with vertices/indices found or processed for physics body.");
+                 }
+            }, undefined, (error) => {
+                console.error('Error loading GLB model for trimesh demo:', error);
+            });
+        }
+
+        function createDynamicCubeStackDemo(currentWorld, currentR, baseX, baseY, baseZ, numLevels) {
+            let rad = 0.5;
+            let shift = rad * 2.0 + 0.05; 
+
+            for (let i = 0; i < numLevels; ++i) { 
+                for (let j = i; j < numLevels; ++j) { 
+                    for (let k = i; k < numLevels; ++k) { 
+                        let x = (k - i * 0.5 - (numLevels - 1) * 0.5) * shift + baseX;
+                        let y = i * shift + baseY + rad;
+                        let z = (j - i * 0.5 - (numLevels - 1) * 0.5) * shift + baseZ;
+
+                        let bodyDesc = currentR.RigidBodyDesc.dynamic().setTranslation(x, y, z);
+                        let body = currentWorld.createRigidBody(bodyDesc);
+                        let colliderDesc = currentR.ColliderDesc.cuboid(rad, rad, rad)
+                            .setDensity(1.0).setFriction(0.7).setRestitution(0.1);
+                        currentWorld.createCollider(colliderDesc, body);
+                        characterControllerDemoCubesElements.bodies.push(body.handle);
+                    }
+                }
+            }
+        }
+
+        function createPidCharacterDemo(currentWorld, currentR, x, y, z) {
+            if (!R || !world) return;
+            let characterDesc = currentR.RigidBodyDesc.dynamic()
+                .setTranslation(x, y, z)
+                .setGravityScale(10.0) 
+                .setSoftCcdPrediction(10.0) 
+                .setCanSleep(false); 
+            pidCharacterElements.body = currentWorld.createRigidBody(characterDesc);
+
+            let characterColliderDesc = currentR.ColliderDesc.cylinder(1.0, 0.5) 
+                .setDensity(1.0); 
+            pidCharacterElements.collider = currentWorld.createCollider(characterColliderDesc, pidCharacterElements.body);
+            
+            pidCharacterElements.controller = currentWorld.createPidController(60.0, 0.0, 1.0, currentR.PidAxesMask.AllAng);
+            pidCharacterElements.targetRotation = new R.Quaternion(0.0, 0.0, 0.0, 1.0); 
+        }
+        
+        // --- New Demo Functions ---
+        function createRoundShapesDemo(currentWorld, currentR, baseX, baseY, baseZ) {
+            if (!currentR || !currentWorld) return;
+            const borderRadius = 0.1;
+
+            // Round Cuboid
+            let rCuboidDesc = currentR.RigidBodyDesc.dynamic().setTranslation(baseX - 1.5, baseY, baseZ);
+            let rCuboidBody = currentWorld.createRigidBody(rCuboidDesc);
+            let rCuboidCollDesc = currentR.ColliderDesc.roundCuboid(0.4, 0.6, 0.4, borderRadius)
+                .setDensity(1.0).setRestitution(0.6);
+            currentWorld.createCollider(rCuboidCollDesc, rCuboidBody);
+            roundShapesDemoElements.bodies.push(rCuboidBody.handle);
+
+            // Round Cylinder
+            let rCylinderDesc = currentR.RigidBodyDesc.dynamic().setTranslation(baseX, baseY, baseZ);
+            let rCylinderBody = currentWorld.createRigidBody(rCylinderDesc);
+            let rCylinderCollDesc = currentR.ColliderDesc.roundCylinder(0.7, 0.3, borderRadius) // halfHeight, radius, borderRadius
+                .setDensity(1.0).setRestitution(0.6);
+            currentWorld.createCollider(rCylinderCollDesc, rCylinderBody);
+            roundShapesDemoElements.bodies.push(rCylinderBody.handle);
+            
+            // Round Cone
+            let rConeDesc = currentR.RigidBodyDesc.dynamic().setTranslation(baseX + 1.5, baseY, baseZ);
+            let rConeBody = currentWorld.createRigidBody(rConeDesc);
+            let rConeCollDesc = currentR.ColliderDesc.roundCone(0.6, 0.4, borderRadius) // halfHeight, radius, borderRadius
+                .setDensity(1.0).setRestitution(0.6);
+            currentWorld.createCollider(rConeCollDesc, rConeBody);
+            roundShapesDemoElements.bodies.push(rConeBody.handle);
+
+            rCuboidBody.applyImpulse({x:0, y:3, z:1}, true);
+            rCylinderBody.applyImpulse({x:0, y:3, z:-1}, true);
+            rConeBody.applyImpulse({x:1, y:3, z:0}, true);
+        }
+
+        function createSensorZoneDemo(currentWorld, currentR, baseX, baseY, baseZ) {
+            if (!currentR || !currentWorld) return;
+
+            let sensorBodyDesc = currentR.RigidBodyDesc.fixed().setTranslation(baseX, baseY, baseZ);
+            sensorDemoElements.sensorBody = currentWorld.createRigidBody(sensorBodyDesc);
+            let sensorColliderDesc = currentR.ColliderDesc.cuboid(2.0, 0.2, 2.0)
+                .setSensor(true)
+                .setActiveEvents(currentR.ActiveEvents.COLLISION_EVENTS);
+            sensorDemoElements.sensorCollider = currentWorld.createCollider(sensorColliderDesc, sensorDemoElements.sensorBody);
+
+            for (let i = 0; i < 5; i++) {
+                let ballBodyDesc = currentR.RigidBodyDesc.dynamic()
+                    .setTranslation(baseX + (Math.random() - 0.5) * 1.5, baseY + 2.0 + i * 0.5, baseZ + (Math.random() - 0.5) * 1.5);
+                let ballBody = currentWorld.createRigidBody(ballBodyDesc);
+                let ballColliderDesc = currentR.ColliderDesc.ball(0.2)
+                    .setDensity(1.0)
+                    .setActiveEvents(currentR.ActiveEvents.COLLISION_EVENTS); 
+                currentWorld.createCollider(ballColliderDesc, ballBody);
+                sensorDemoElements.dynamicBodies.push(ballBody.handle); 
+            }
+        }
+        
+        function createDominanceDemo(currentWorld, currentR, baseX, baseY, baseZ) {
+            if (!currentR || !currentWorld) return;
+
+            let dominantBodyDesc = currentR.RigidBodyDesc.dynamic()
+                .setTranslation(baseX - 1.0, baseY, baseZ)
+                .setLinvel(10.0, 0.0, 0.0) 
+                .setDominanceGroup(10);
+            let dominantBody = currentWorld.createRigidBody(dominantBodyDesc);
+            let dominantColliderDesc = currentR.ColliderDesc.cuboid(0.5, 0.5, 0.5).setDensity(1.0);
+            currentWorld.createCollider(dominantColliderDesc, dominantBody);
+            dominanceDemoElements.bodies.push(dominantBody.handle);
+
+            let normalBodyDesc = currentR.RigidBodyDesc.dynamic()
+                .setTranslation(baseX + 1.0, baseY, baseZ)
+                .setLinvel(-10.0, 0.0, 0.0); 
+            let normalBody = currentWorld.createRigidBody(normalBodyDesc);
+            let normalColliderDesc = currentR.ColliderDesc.cuboid(0.5, 0.5, 0.5).setDensity(1.0); // Default dominance group 0
+            currentWorld.createCollider(normalColliderDesc, normalBody);
+            dominanceDemoElements.bodies.push(normalBody.handle);
+        }
+
+
+        function initDemo() {
+            cleanupPhysics();
+            
+            controlledBotIndex = -1;
+            cameraTargetIsPidCharacter = false;
+
+            if (params.selectedBotName !== "None") { 
+                params.selectedBotName = "None"; 
+                 if (gui && gui.__controllers) { 
+                    gui.__controllers.forEach(c => {
+                        if (c.property === 'selectedBotName') c.updateDisplay();
+                    });
+                }
+            }
+            
+            userInput.forward = 0;
+            userInput.strafe = 0;
+            userInput.attemptingJump = false;
+
+            controlledBotState.worldVelocityY = 0.0;
+            controlledBotState.targetHorizontalVelocity.set(0,0,0);
+            controlledBotState.currentHorizontalVelocity.set(0,0,0);
+            controlledBotState.onGround = false;
+            controlledBotState.isOnMovingPlatform = false;
+
+
+            if (platformDisplacementForFrame) {
+                platformDisplacementForFrame.x = 0; platformDisplacementForFrame.y = 0; platformDisplacementForFrame.z = 0;
+            }
+            platformWorldVelocity.set(0,0,0);
+            platformTimer = 0.0; 
+
+            world = new R.World({ x: 0.0, y: -worldGravity, z: 0.0 });
+            if (eventQueue) eventQueue.clear(); 
+
+            const nsubdivs = 40; 
+            const groundSize = 80.0; 
+            const heightScaleFactor = 3.0; 
+            let heights = generateHeightfield(nsubdivs, heightScaleFactor);
+            let scale = new R.Vector3(groundSize, heightScaleFactor, groundSize); 
+            let groundBodyDesc = R.RigidBodyDesc.fixed().setTranslation(0, -heightScaleFactor * 0.3, 0); 
+            groundBody = world.createRigidBody(groundBodyDesc);
+            let groundColliderDesc = R.ColliderDesc.heightfield(nsubdivs, nsubdivs, heights, scale).setFriction(1.0);
+            world.createCollider(groundColliderDesc, groundBody);
+
+            
+            activeBotCharacterController = world.createCharacterController(controllerOffset);
+            activeBotCharacterController.enableAutostep(0.3, 0.15, true);
+            activeBotCharacterController.enableSnapToGround(0.25);
+            activeBotCharacterController.setUp(new R.Vector3(0, 1, 0));
+            activeBotCharacterController.setApplyImpulsesToDynamicBodies(true); 
+
+            bots = [];
+            for (let i = 0; i < botCount; i++) {
+                let botBodyDesc = R.RigidBodyDesc.dynamic()
+                    .setTranslation(Math.random() * 10 - 5, 5 + botRadius, Math.random() * 10 - 5) 
+                    .setCanSleep(false); 
+                let botBody = world.createRigidBody(botBodyDesc);
+                let botColliderDesc = R.ColliderDesc.ball(botRadius).setDensity(1.0).setRestitution(0.7); 
+                let botCollider = world.createCollider(botColliderDesc, botBody);
+                bots.push({
+                    name: `Bot ${i + 1}`,
+                    rigidBody: botBody,
+                    collider: botCollider,
+                    originalBodyType: R.RigidBodyType.Dynamic, 
+                    onGroundAI: false, 
+                    isOnMovingPlatformAI: false,
+                    timeSinceLastJump: Math.random() * 5,
+                    jumpCooldown: 2 + Math.random() * 3,
+                });
+            }
+
+            createPyramid(15, 3, 10); 
+            createMovingPlatform(-15, 4, -10); 
+            createPendulum(new R.Vector3(10, 12, -10), 5.0, 0.5); 
+            createPrismaticJointDemo(world, R, 20, 4.0, 0); 
+            createCollisionGroupsDemo(world, R, -20, 6, 0); 
+            createLockedAxesDemo(world, R, 0, 8, 20); 
+
+            createKevaTower(world, R, -5, 1.0, 15); 
+            createFountainDemo(world, R, 10, 7, -15); 
+            createSphericalJointsDemo(world, R, -10, 3, 15); 
+            createCCDDemo(world, R, 0, 4, -25); 
+            createFixedJointDemo(world, R, 5, 8, -5); 
+
+
+            createGLBConvexHullDemo(world, R, scene, 0, 10, -10); 
+            createDampingDemo(world, R, 20, 8, 10);
+            createVoxelPlatformDemo(world, R, -15, 2, 20);
+            createConvexPolyhedraDemo(world, R, 0, 15, 0);
+            createMotoredRevoluteJointDemo(world, R, 15, 3, -20);
+
+            addStackedDynamicShapesDemo(world, R, 5, 1, 5, false); 
+            if (movingPlatformBody) { 
+                 const platformPos = movingPlatformBody.translation(); 
+                 addStackedDynamicShapesDemo(world, R, platformPos.x, platformPos.y, platformPos.z, true); 
+            }
+            createRevoluteJointsGridDemo(world, R, -25, 8, 25, 3); 
+            createBallJointsGridDemo(world, R, 25, 8, 25, 4); 
+            createStaticTrimeshAreaDemo(world, R, 30, 1, 0);
+            createGLBTrimeshDemo(world, R, scene, -5, 10, 10); 
+            createDynamicCubeStackDemo(world, R, 25, 3, -25, 4); 
+
+            createPidCharacterDemo(world, R, -10, 5, -5);
+
+            createRoundShapesDemo(world, R, -25, 5, -15);
+            createSensorZoneDemo(world, R, 25, 2, 15);
+            createDominanceDemo(world, R, 0, 2, 25);
+
+
+            cameraYaw = Math.PI / 2 + Math.PI /4 ; 
+            cameraPitch = -Math.PI / 6;      
+        }
+
+        function createPyramid(baseX, baseY, baseZ) {
+            if (!R || !world) return;
+            let rad = 0.5;
+            let num = 4;
+            let shift = rad * 2.0;
+            
+            for (let i = 0; i < num; ++i) {
+                for (let j = i; j < num; ++j) {
+                    for (let k = i; k < num; ++k) {
+                        let x = (k - i * 0.5 - (num-1) * 0.5) * shift + baseX;
+                        let y = i * shift + baseY;
+                        let z = (j - i * 0.5 - (num-1) * 0.5) * shift + baseZ;
+
+                        let bodyDesc = R.RigidBodyDesc.dynamic().setTranslation(x, y, z);
+                        let body = world.createRigidBody(bodyDesc);
+                        let colliderDesc = R.ColliderDesc.cuboid(rad, rad, rad).setDensity(0.8).setFriction(0.8);
+                        world.createCollider(colliderDesc, body);
+                    }
+                }
+            }
+        }
+        
+        function createMovingPlatform(x, y, z) {
+            if (!R || !world) return;
+            
+            let platformBodyDesc = R.RigidBodyDesc.kinematicVelocityBased()
+                .setTranslation(x,y,z); 
+            movingPlatformBody = world.createRigidBody(platformBodyDesc);
+            
+            const platformWidth = 7.0; 
+            const platformDepth = 5.0;
+            const platformHeightVariance = 0.3; 
+            const platformSubdivisions = 6; 
+            
+            let trimesh = generateTriMesh(R, platformSubdivisions, platformWidth, platformHeightVariance, platformDepth);
+            let platformColliderDesc = R.ColliderDesc.trimesh(trimesh.vertices, trimesh.indices)
+                .setFriction(1.0)
+                .setTranslation(0,0,0); 
+            world.createCollider(platformColliderDesc, movingPlatformBody);
+        }
+
+
+        function createPendulum(anchorPos, length, bobRadius) {
+            if (!R || !world) return;
+            let anchorBody = world.createRigidBody(R.RigidBodyDesc.fixed().setTranslation(anchorPos.x, anchorPos.y, anchorPos.z));
+            pendulumElements.bodies.push(anchorBody.handle);
+
+            let bobBodyDesc = R.RigidBodyDesc.dynamic()
+                .setTranslation(anchorPos.x, anchorPos.y - length, anchorPos.z)
+                .setCanSleep(false);
+            let bobBody = world.createRigidBody(bobBodyDesc);
+            let bobColliderDesc = R.ColliderDesc.ball(bobRadius).setDensity(2.0);
+            world.createCollider(bobColliderDesc, bobBody); 
+            pendulumElements.bodies.push(bobBody.handle);
+
+            let jointParams = R.JointData.revolute(
+                new R.Vector3(0.0, 0.0, 0.0), 
+                new R.Vector3(0.0, length, 0.0), 
+                new R.Vector3(0.0, 0.0, 1.0) 
+            );
+            pendulumElements.joint = world.createImpulseJoint(jointParams, anchorBody, bobBody, true);
+        }
+
+
+        function onPointerLockChange() {
+            if (document.pointerLockElement === renderer.domElement) {
+                document.addEventListener('mousemove', onDocumentMouseMove, false);
+                 if (controlledBotIndex !== -1 || cameraTargetIsPidCharacter) { 
+                    document.getElementById('crosshair').style.display = 'block';
+                }
+            } else {
+                document.removeEventListener('mousemove', onDocumentMouseMove, false);
+                document.getElementById('crosshair').style.display = 'none';
+                userInput.forward = 0;
+                userInput.strafe = 0;
+            }
+        }
+
+        function onDocumentMouseMove(event) {
+            if (controlledBotIndex !== -1 || cameraTargetIsPidCharacter) { 
+                cameraYaw -= event.movementX * 0.002;
+                cameraPitch -= event.movementY * 0.002;
+                cameraPitch = Math.max(-Math.PI / 2 + 0.2, Math.min(Math.PI / 2 - 0.2, cameraPitch));
+            }
+        }
+
+
+        function initJoysticks() {
+            const leftJoystickZone = document.getElementById('joystick-zone-left');
+            const rightJoystickZone = document.getElementById('joystick-zone-right');
+
+            if (!leftJoystickZone || !rightJoystickZone) {
+                console.error("Joystick zones not found!");
+                return;
+            }
+            const joystickOptions = {
+                zone: leftJoystickZone, 
+                mode: 'static', 
+                position: { left: '50%', top: '50%' }, 
+                color: 'white',
+                size: 100, 
+            };
+
+            const leftNipple = nipplejs.create({...joystickOptions, zone: leftJoystickZone }).get();
+            leftNipple.on('start move dir plain', (evt, data) => { 
+                if (data.vector && controlledBotIndex !== -1) {
+                    userInput.forward = data.vector.y; 
+                    userInput.strafe = data.vector.x; 
+                }
+            });
+            leftNipple.on('end', () => {
+                userInput.forward = 0;
+                userInput.strafe = 0;
+            });
+
+
+            const rightNipple = nipplejs.create({...joystickOptions, zone: rightJoystickZone }).get();
+            rightNipple.on('start move dir plain', (evt, data) => {
+                if (data.vector && (controlledBotIndex !== -1 || cameraTargetIsPidCharacter)) { 
+                    cameraYaw -= data.vector.x * cameraRotationSpeed * 2.0; 
+                    cameraPitch -= data.vector.y * cameraRotationSpeed * 1.5; 
+                    cameraPitch = Math.max(-Math.PI / 2 + 0.2, Math.min(Math.PI / 2 - 0.2, cameraPitch));
+                }
+            });
+        }
+
+
+        function setupInputListeners() {
+            if (isMobile) {
+                initJoysticks();
+            } else {
+                renderer.domElement.addEventListener('click', () => {
+                    if ((controlledBotIndex !== -1 || cameraTargetIsPidCharacter) && document.pointerLockElement !== renderer.domElement) {
+                        renderer.domElement.requestPointerLock();
+                    }
+                });
+                document.addEventListener('pointerlockchange', onPointerLockChange, false);
+
+                document.addEventListener('keydown', (event) => {
+                    // Controlled Bot Input
+                    if (controlledBotIndex !== -1 && (document.pointerLockElement === renderer.domElement || isMobile)) { 
+                        switch(event.key.toLowerCase()) {
+                            case 'w': userInput.forward = 1; break;
+                            case 's': userInput.forward = -1; break;
+                            case 'a': userInput.strafe = -1; break;  
+                            case 'd': userInput.strafe = 1; break;   
+                            case ' ':
+                                if (controlledBotState.onGround && !userInput.attemptingJump) {
+                                    userInput.attemptingJump = true;
+                                }
+                                break;
+                        }
+                    }
+                    // PID Character Input
+                    if (pidCharacterElements.body) {
+                         switch(event.key) {
+                            case 'ArrowUp': pidCharacterElements.movementDirection.z = pidCharacterSpeed; break;
+                            case 'ArrowDown': pidCharacterElements.movementDirection.z = -pidCharacterSpeed; break;
+                            case 'ArrowLeft': pidCharacterElements.movementDirection.x = pidCharacterSpeed; break;
+                            case 'ArrowRight': pidCharacterElements.movementDirection.x = -pidCharacterSpeed; break;
+                            case 'PageUp': pidCharacterElements.movementDirection.y = pidCharacterSpeed; break;
+                            case 'PageDown': pidCharacterElements.movementDirection.y = -pidCharacterSpeed; break;
+                        }
+                    }
+                });
+                document.addEventListener('keyup', (event) => {
+                    // Controlled Bot Input
+                     if (controlledBotIndex !== -1 && (document.pointerLockElement === renderer.domElement || isMobile)) {
+                        switch(event.key.toLowerCase()) {
+                            case 'w': if (userInput.forward === 1) userInput.forward = 0; break;
+                            case 's': if (userInput.forward === -1) userInput.forward = 0; break;
+                            case 'a': if (userInput.strafe === -1) userInput.strafe = 0; break;
+                            case 'd': if (userInput.strafe === 1) userInput.strafe = 0; break;
+                            case ' ':
+                                userInput.attemptingJump = false; 
+                                break;
+                        }
+                    }
+                    // PID Character Input
+                    if (pidCharacterElements.body) {
+                        switch(event.key) {
+                            case 'ArrowUp': if (pidCharacterElements.movementDirection.z > 0) pidCharacterElements.movementDirection.z = 0; break;
+                            case 'ArrowDown': if (pidCharacterElements.movementDirection.z < 0) pidCharacterElements.movementDirection.z = 0; break;
+                            case 'ArrowLeft': if (pidCharacterElements.movementDirection.x > 0) pidCharacterElements.movementDirection.x = 0; break;
+                            case 'ArrowRight': if (pidCharacterElements.movementDirection.x < 0) pidCharacterElements.movementDirection.x = 0; break;
+                            case 'PageUp': if (pidCharacterElements.movementDirection.y > 0) pidCharacterElements.movementDirection.y = 0; break;
+                            case 'PageDown': if (pidCharacterElements.movementDirection.y < 0) pidCharacterElements.movementDirection.y = 0; break;
+                        }
+                    }
+                });
+            }
+        }
+        
+        function getControlledBotGroundColliderInfo() {
+            if (controlledBotIndex === -1 || !activeBotCharacterController || !bots[controlledBotIndex].collider || !world) return null;
+            
+            const botColliderHandle = bots[controlledBotIndex].collider.handle;
+
+            if (activeBotCharacterController.computedGrounded()) {
+                for (let i = 0; i < activeBotCharacterController.numComputedCollisions(); i++) {
+                    const collision = activeBotCharacterController.computedCollision(i);
+                     if (collision && collision.collider1 !== undefined && collision.collider2 !== undefined) {
+                         let otherColliderHandle = collision.collider1 === botColliderHandle ? collision.collider2 : collision.collider1;
+                         let otherCollider = world.getCollider(otherColliderHandle);
+                         if (otherCollider) return otherCollider; 
+                    }
+                }
+            }
+            return null;
+        }
+
+        function updatePlatforms(deltaTime) {
+            if (!movingPlatformBody || !R || !world || deltaTime <= 0) {
+                if(platformDisplacementForFrame) {
+                     platformDisplacementForFrame.x=0; platformDisplacementForFrame.y=0; platformDisplacementForFrame.z=0;
+                }
+                platformWorldVelocity.set(0,0,0);
+                return;
+            }
+            const platformRB = world.getRigidBody(movingPlatformBody.handle);
+            if (!platformRB) {
+                 if(platformDisplacementForFrame) {
+                    platformDisplacementForFrame.x=0; platformDisplacementForFrame.y=0; platformDisplacementForFrame.z=0;
+                }
+                platformWorldVelocity.set(0,0,0);
+                movingPlatformBody = null; 
+                return;
+            }
+
+            platformTimer += deltaTime;
+            
+            const newLinvelY = Math.sin(platformTimer * 1.0) * 15.0;//1.5 
+            const newAngvelY = Math.cos(platformTimer * 0.5) * 0.3; 
+
+            platformRB.setLinvel({ x: 0.0, y: newLinvelY, z: 0.0 }, true);
+            platformRB.setAngvel({ x: 0.0, y: newAngvelY, z: 0.0 }, true);
+            
+            const currentPos = platformRB.translation(); 
+            const nextExpectedPos = new R.Vector3(
+                currentPos.x, 
+                currentPos.y + newLinvelY * deltaTime,
+                currentPos.z
+            );
+
+            platformDisplacementForFrame.x = nextExpectedPos.x - currentPos.x;
+            platformDisplacementForFrame.y = nextExpectedPos.y - currentPos.y;
+            platformDisplacementForFrame.z = nextExpectedPos.z - currentPos.z;
+            
+            platformWorldVelocity.x = 0; 
+            platformWorldVelocity.y = newLinvelY;
+            platformWorldVelocity.z = 0; 
+        }
+
+
+        const tempInputForce = new THREE.Vector3();
+        const tempAcceleration = new THREE.Vector3();
+
+        function updateControlledBotPhysics(deltaTime) {
+            if (controlledBotIndex === -1 || !bots[controlledBotIndex] || !activeBotCharacterController || !R || !world || deltaTime <= 0) return;
+            
+            const currentBot = bots[controlledBotIndex];
+            const currentBotRB = world.getRigidBody(currentBot.rigidBody.handle);
+            if (!currentBotRB || !currentBot.collider) return;
+
+
+            const finalDesiredDisplacementCC = new R.Vector3(0, 0, 0); 
+            
+            const yawQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), cameraYaw);
+            tempWorldDirection.set(0, 0, -1).applyQuaternion(yawQuaternion); 
+            tempRightDirection.set(1, 0, 0).applyQuaternion(yawQuaternion); 
+
+            tempInputForce.set(0,0,0);
+            if (userInput.forward !== 0) {
+                tempInputForce.addScaledVector(tempWorldDirection, userInput.forward);
+            }
+            if (userInput.strafe !== 0) {
+                tempInputForce.addScaledVector(tempRightDirection, userInput.strafe);
+            }
+
+
+            controlledBotState.targetHorizontalVelocity.set(0,0,0);
+            if (tempInputForce.lengthSq() > 0) {
+                tempInputForce.normalize().multiplyScalar(botMaxMoveSpeed);
+                controlledBotState.targetHorizontalVelocity.copy(tempInputForce);
+            }
+
+            controlledBotState.onGround = activeBotCharacterController.computedGrounded();
+            controlledBotState.isOnMovingPlatform = false;
+
+            if (controlledBotState.onGround) {
+                let groundCollider = getControlledBotGroundColliderInfo();
+                if (groundCollider && movingPlatformBody && groundCollider.parent() &&
+                    groundCollider.parent().handle === movingPlatformBody.handle) { 
+                    controlledBotState.isOnMovingPlatform = true;
+                }
+            }
+
+            if (controlledBotState.onGround) {
+                let targetAccelFrom;
+                if (controlledBotState.isOnMovingPlatform) {
+                    targetAccelFrom = platformWorldVelocity.clone().add(controlledBotState.targetHorizontalVelocity);
+                } else {
+                    targetAccelFrom = controlledBotState.targetHorizontalVelocity.clone();
+                }
+                tempAcceleration.subVectors(targetAccelFrom, controlledBotState.currentHorizontalVelocity).multiplyScalar(botGroundAcceleration * deltaTime);
+                controlledBotState.currentHorizontalVelocity.add(tempAcceleration);
+
+                if (controlledBotState.targetHorizontalVelocity.lengthSq() === 0 && !controlledBotState.isOnMovingPlatform) { 
+                     controlledBotState.currentHorizontalVelocity.multiplyScalar(Math.max(0, 1 - botGroundDamping * deltaTime));
+                }
+
+            } else { 
+                tempAcceleration.subVectors(controlledBotState.targetHorizontalVelocity, controlledBotState.currentHorizontalVelocity).multiplyScalar(botAirAcceleration * deltaTime);
+                controlledBotState.currentHorizontalVelocity.add(tempAcceleration);
+                controlledBotState.currentHorizontalVelocity.multiplyScalar(Math.max(0, 1 - botAirDamping * deltaTime));
+            }
+            
+            const currentHSpeedSq = controlledBotState.currentHorizontalVelocity.x * controlledBotState.currentHorizontalVelocity.x + controlledBotState.currentHorizontalVelocity.z * controlledBotState.currentHorizontalVelocity.z;
+            if (currentHSpeedSq > botMaxMoveSpeed * botMaxMoveSpeed) {
+                 if (controlledBotState.targetHorizontalVelocity.lengthSq() > 0 || !controlledBotState.isOnMovingPlatform ) { 
+                    const HSpeed = Math.sqrt(currentHSpeedSq);
+                    controlledBotState.currentHorizontalVelocity.multiplyScalar(botMaxMoveSpeed / HSpeed);
+                }
+            }
+
+
+            finalDesiredDisplacementCC.x = controlledBotState.currentHorizontalVelocity.x * deltaTime;
+            finalDesiredDisplacementCC.z = controlledBotState.currentHorizontalVelocity.z * deltaTime;
+
+            if (controlledBotState.isOnMovingPlatform) {
+                finalDesiredDisplacementCC.x += platformDisplacementForFrame.x;
+                finalDesiredDisplacementCC.y += platformDisplacementForFrame.y; 
+                finalDesiredDisplacementCC.z += platformDisplacementForFrame.z;
+            }
+
+
+            if (controlledBotState.onGround) {
+                controlledBotState.worldVelocityY = -worldGravity * deltaTime * 0.1; 
+                if (userInput.attemptingJump) {
+                    controlledBotState.worldVelocityY = botJumpForce;
+                    if (controlledBotState.isOnMovingPlatform) { 
+                        controlledBotState.currentHorizontalVelocity.x += platformWorldVelocity.x;
+                        controlledBotState.worldVelocityY += platformWorldVelocity.y; 
+                        controlledBotState.currentHorizontalVelocity.z += platformWorldVelocity.z;
+                    }
+                    controlledBotState.onGround = false; 
+                    userInput.attemptingJump = false; 
+                }
+            } else {
+                controlledBotState.worldVelocityY -= worldGravity * deltaTime;
+            }
+            finalDesiredDisplacementCC.y += controlledBotState.worldVelocityY * deltaTime; 
+
+            activeBotCharacterController.computeColliderMovement(currentBot.collider, finalDesiredDisplacementCC);
+
+            const correctedMovement = activeBotCharacterController.computedMovement();
+
+            if (activeBotCharacterController.computedGrounded() && controlledBotState.worldVelocityY < 0 && correctedMovement.y >= finalDesiredDisplacementCC.y - 0.001) { 
+                controlledBotState.worldVelocityY = 0;
+                 if (!controlledBotState.isOnMovingPlatform && controlledBotState.targetHorizontalVelocity.lengthSq() === 0) {
+                    controlledBotState.currentHorizontalVelocity.lerp(new THREE.Vector3(0,0,0), 0.2); 
+                }
+            }
+
+            let currentPos = currentBotRB.translation();
+            let newPosVec = new R.Vector3(
+                currentPos.x + correctedMovement.x,
+                currentPos.y + correctedMovement.y,
+                currentPos.z + correctedMovement.z
+            );
+            currentBotRB.setNextKinematicTranslation(newPosVec);
+        }
+
+        function updatePidCharacter(deltaTime) {
+            if (!pidCharacterElements.body || !pidCharacterElements.controller || !R || !world) return;
+
+            const characterRB = world.getRigidBody(pidCharacterElements.body.handle);
+            if (!characterRB) return;
+
+            const pidController = pidCharacterElements.controller; 
+            
+            if (!pidController) return; 
+
+            const targetVelocity = { x: 0.0, y: 0.0, z: 0.0 }; 
+
+            if (pidCharacterElements.movementDirection.x === 0.0 &&
+                pidCharacterElements.movementDirection.y === 0.0 &&
+                pidCharacterElements.movementDirection.z === 0.0) {
+                pidController.setAxes(R.PidAxesMask.AllAng); 
+            } else if (pidCharacterElements.movementDirection.y === 0.0) {
+                pidController.setAxes(R.PidAxesMask.AllAng | R.PidAxesMask.LinX | R.PidAxesMask.LinZ);
+            } else {
+                pidController.setAxes(R.PidAxesMask.All); 
+            }
+            
+            const currentPos = characterRB.translation();
+            const targetPoint = new R.Vector3(
+                currentPos.x + pidCharacterElements.movementDirection.x,
+                currentPos.y + pidCharacterElements.movementDirection.y,
+                currentPos.z + pidCharacterElements.movementDirection.z
+            );
+
+            pidController.applyLinearCorrection(characterRB, targetPoint, targetVelocity);
+            pidController.applyAngularCorrection(characterRB, pidCharacterElements.targetRotation, targetVelocity);
+        }
+
+
+        function updateBots(deltaTime) {
+            if (!R || !world) return;
+
+            bots.forEach((bot, index) => {
+                if (index === controlledBotIndex) return; 
+                const botRB = world.getRigidBody(bot.rigidBody.handle);
+                if (!botRB || botRB.isSleeping()) return;
+
+
+                const botPos = botRB.translation();
+                const botLinvel = botRB.linvel();
+                const botMass = botRB.mass();
+
+                const groundCheckRayOrigin = new R.Vector3(botPos.x, botPos.y, botPos.z);
+                const groundCheckRayDir = new R.Vector3(0, -1, 0);
+                const rayMaxToi = botRadius + 0.1; 
+
+                let filterFlags = R.QueryFilterFlags.EXCLUDE_KINEMATIC; 
+                let filterGroups = undefined; 
+                let filterExcludeCollider = bot.collider.handle; 
+                let filterExcludeRigidBody = undefined; 
+                let filterPredicate = undefined; 
+
+                const rayHit = world.castRay(
+                    new R.Ray(groundCheckRayOrigin, groundCheckRayDir),
+                    rayMaxToi,
+                    true, 
+                    filterFlags,
+                    filterGroups,
+                    filterExcludeCollider, 
+                    filterExcludeRigidBody,
+                    filterPredicate
+                );
+
+                bot.onGroundAI = false;
+                bot.isOnMovingPlatformAI = false;
+                let platformVelForBot = new THREE.Vector3(0,0,0); 
+
+                if (rayHit && rayHit.collider) {
+                    bot.onGroundAI = true;
+                    const groundCollider = world.getCollider(rayHit.collider);
+                     if (groundCollider && movingPlatformBody && groundCollider.parent() && 
+                        groundCollider.parent().handle === movingPlatformBody.handle) {
+                        bot.isOnMovingPlatformAI = true;
+                        platformVelForBot.copy(platformWorldVelocity); 
+                    }
+                }
+
+                bot.timeSinceLastJump += deltaTime;
+                if (bot.onGroundAI && bot.timeSinceLastJump > bot.jumpCooldown && Math.random() < 0.015) { 
+                    const jumpImpulseY = botJumpForce * 0.7 * botMass; 
+                    botRB.applyImpulse(new R.Vector3(0, jumpImpulseY, 0), true);
+                    bot.onGroundAI = false; 
+                    
+                    if (bot.isOnMovingPlatformAI && deltaTime > 0) {
+                        const inertiaImpulseX = platformVelForBot.x * botMass;
+                        const inertiaImpulseY = platformVelForBot.y * botMass; 
+                        const inertiaImpulseZ = platformVelForBot.z * botMass;
+                        botRB.applyImpulse(new R.Vector3(inertiaImpulseX, inertiaImpulseY, inertiaImpulseZ), true);
+                    }
+                    bot.timeSinceLastJump = 0;
+                }
+                
+                if (Math.random() < 0.02) { 
+                    bot.targetAIX = botPos.x + (Math.random() - 0.5) * 10; 
+                    bot.targetAIZ = botPos.z + (Math.random() - 0.5) * 10;
+                }
+
+                if (bot.targetAIX !== undefined && bot.onGroundAI) {
+                    let directionToTarget = new R.Vector3(
+                        bot.targetAIX - botPos.x,
+                        0, 
+                        bot.targetAIZ - botPos.z
+                    );
+
+                    const distToTargetSq = directionToTarget.x * directionToTarget.x + directionToTarget.z * directionToTarget.z;
+                    
+                    if (distToTargetSq > 1.0) { 
+                        const distToTarget = Math.sqrt(distToTargetSq);
+                        const normalizedDirX = directionToTarget.x / distToTarget;
+                        const normalizedDirZ = directionToTarget.z / distToTarget;
+
+                        const desiredSpeed = 1.8; 
+                        const forceFactor = 15.0 * botMass; 
+
+                        const targetVelX = normalizedDirX * desiredSpeed;
+                        const targetVelZ = normalizedDirZ * desiredSpeed;
+                        
+                        const forceX = (targetVelX - botLinvel.x) * forceFactor * 0.2; 
+                        const forceZ = (targetVelZ - botLinvel.z) * forceFactor * 0.2;
+
+                        botRB.addForce(new R.Vector3(forceX, 0, forceZ), true);
+                    } else { 
+                        bot.targetAIX = undefined; 
+                        bot.targetAIZ = undefined;
+                         botRB.setLinvel(new R.Vector3(botLinvel.x * 0.8, botLinvel.y, botLinvel.z * 0.8), true); 
+                    }
+                } else if (bot.onGroundAI) { 
+                     botRB.setLinvel(new R.Vector3(botLinvel.x * 0.92, botLinvel.y, botLinvel.z * 0.92), true);
+                }
+
+            });
+        }
+
+        let lastTime = 0;
+        let firstFrame = true;
+
+        function updateCamera() {
+            if (cameraTargetIsPidCharacter && pidCharacterElements.body && world.getRigidBody(pidCharacterElements.body.handle)) {
+                const pidCharRB = world.getRigidBody(pidCharacterElements.body.handle);
+                const charPosition = pidCharRB.translation();
+                cameraBoom.position.set(charPosition.x, charPosition.y + cameraPivotOffsetY, charPosition.z);
+                cameraBoom.rotation.y = cameraYaw;
+                const pitchQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), cameraPitch);
+                camera.quaternion.copy(pitchQuaternion);
+                camera.position.set(0,0,cameraDistance);
+                return;
+            } else if (controlledBotIndex !== -1 && bots[controlledBotIndex]) {
+                const controlledBotRB = world.getRigidBody(bots[controlledBotIndex].rigidBody.handle);
+                if (controlledBotRB) {
+                    const botPosition = controlledBotRB.translation();
+                    cameraBoom.position.set(botPosition.x, botPosition.y + cameraPivotOffsetY, botPosition.z);
+                    cameraBoom.rotation.y = cameraYaw; 
+
+                    const pitchQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), cameraPitch);
+                    camera.quaternion.copy(pitchQuaternion); 
+                    camera.position.set(0,0,cameraDistance); 
+                    return; 
+                }
+            }
+            
+            // Default/World View
+            cameraBoom.position.copy(worldViewCameraLookAt); 
+            cameraBoom.rotation.y = cameraYaw; // Keep current yaw for smooth transition if desired
+            const pitchQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0), cameraPitch); // Keep pitch
+            camera.quaternion.copy(pitchQuaternion);
+            camera.position.copy(worldViewCameraPos); 
+            camera.lookAt(cameraBoom.position); 
+        }
+
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const currentTime = performance.now();
+            let deltaTime = (currentTime - (lastTime || currentTime)) / 1000;
+            if (deltaTime <=0 && lastTime !== 0) deltaTime = 1/60; 
+            deltaTime = Math.max(1/240, Math.min(deltaTime, 1/30)); 
+            lastTime = currentTime;
+
+
+            stats.begin();
+
+            if (params.running && world && R) { 
+                updatePlatforms(deltaTime);
+                if (controlledBotIndex !== -1) {
+                    updateControlledBotPhysics(deltaTime);
+                }
+                updateBots(deltaTime); 
+                updateFountain(world, R); 
+                updatePidCharacter(deltaTime); 
+
+                const updateGLB = (elements) => {
+                    elements.models.forEach(model => {
+                        if (model.userData.physicsBody && world.getRigidBody(model.userData.physicsBody.handle)) {
+                            const physBody = model.userData.physicsBody;
+                            const pos = physBody.translation();
+                            const rot = physBody.rotation();
+                            model.position.set(pos.x, pos.y, pos.z);
+                            model.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+                        }
+                    });
+                };
+                updateGLB(glbConvexHullDemoElements);
+                updateGLB(glbTrimeshDemoElements);
+                
+                world.step(eventQueue); 
+
+                eventQueue.drainCollisionEvents((handle1, handle2, started) => {
+                    if (!R || !world || !sensorDemoElements.sensorCollider) return; 
+
+                    const sensorColliderHandle = sensorDemoElements.sensorCollider.handle;
+                    let involvedSensorColliderHandle = -1; 
+                    let otherColliderHandle = -1;       
+
+                    if (handle1 === sensorColliderHandle) {
+                        involvedSensorColliderHandle = handle1;
+                        otherColliderHandle = handle2;
+                    } else if (handle2 === sensorColliderHandle) {
+                        involvedSensorColliderHandle = handle2;
+                        otherColliderHandle = handle1;
+                    }
+
+                    if (involvedSensorColliderHandle !== -1) { 
+                        const otherCollider = world.getCollider(otherColliderHandle);
+                        if (otherCollider) {
+                            const parentBodyOfOther = otherCollider.parent();
+                            if (parentBodyOfOther) {
+                                const parentBodyHandleOfOther = parentBodyOfOther.handle;
+                                const isTrackedDynamicBody = sensorDemoElements.dynamicBodies.some(
+                                    trackedRbHandle => trackedRbHandle === parentBodyHandleOfOther
+                                );
+
+                                if (isTrackedDynamicBody) {
+                                    if (started) {
+                                        console.log(`Sensor Zone: Tracked RB ${parentBodyHandleOfOther} (via Collider ${otherColliderHandle}) ENTERED sensor ${sensorColliderHandle}.`);
+                                    } else {
+                                        console.log(`Sensor Zone: Tracked RB ${parentBodyHandleOfOther} (via Collider ${otherColliderHandle}) EXITED sensor ${sensorColliderHandle}.`);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+            
+            if(firstFrame && R) { 
+                updateCamera(); 
+                firstFrame = false;
+            }
+            if (R) updateCamera(); 
+
+
+            if (world && physicsLines && physicsLines.geometry) {
+                const buffers = world.debugRender();
+                if (buffers && buffers.vertices && buffers.vertices.length > 0) {
+                    physicsLines.geometry.setAttribute('position', new THREE.BufferAttribute(buffers.vertices, 3));
+                    physicsLines.geometry.setAttribute('color', new THREE.BufferAttribute(buffers.colors, 4));
+                    if (physicsLines.geometry.attributes.position) physicsLines.geometry.attributes.position.needsUpdate = true;
+                    if (physicsLines.geometry.attributes.color) physicsLines.geometry.attributes.color.needsUpdate = true;
+                    physicsLines.visible = true;
+                } else {
+                     physicsLines.visible = false; 
+                }
+            } else if (physicsLines) {
+                physicsLines.visible = false;
+            }
+
+
+            if (renderer && scene && camera) renderer.render(scene, camera);
+            stats.end();
+        }
+        
+        function adjustedSetupInputListeners() {
+            if (isMobile) {
+                initJoysticks();
+            } else {
+                renderer.domElement.addEventListener('click', () => {
+                    if ((controlledBotIndex !== -1 || cameraTargetIsPidCharacter) && document.pointerLockElement !== renderer.domElement) {
+                        renderer.domElement.requestPointerLock();
+                    }
+                });
+                document.addEventListener('pointerlockchange', onPointerLockChange, false);
+
+                document.addEventListener('keydown', (event) => {
+                    if (document.pointerLockElement === renderer.domElement || isMobile) { 
+                        if (controlledBotIndex !== -1) { 
+                            switch(event.key.toLowerCase()) {
+                                case 'w': userInput.forward = 1; break;
+                                case 's': userInput.forward = -1; break;
+                                case 'a': userInput.strafe = -1; break;  
+                                case 'd': userInput.strafe = 1; break;   
+                                case ' ':
+                                    if (controlledBotState.onGround && !userInput.attemptingJump) {
+                                        userInput.attemptingJump = true;
+                                    }
+                                    break;
+                            }
+                        }
+                    }
+                    if (pidCharacterElements.body) {
+                         switch(event.key) { 
+                            case 'ArrowUp': pidCharacterElements.movementDirection.z = pidCharacterSpeed; break;
+                            case 'ArrowDown': pidCharacterElements.movementDirection.z = -pidCharacterSpeed; break;
+                            case 'ArrowLeft': pidCharacterElements.movementDirection.x = pidCharacterSpeed; break;
+                            case 'ArrowRight': pidCharacterElements.movementDirection.x = -pidCharacterSpeed; break;
+                            case 'PageUp': pidCharacterElements.movementDirection.y = pidCharacterSpeed; break;
+                            case 'PageDown': pidCharacterElements.movementDirection.y = -pidCharacterSpeed; break;
+                        }
+                    }
+                });
+                document.addEventListener('keyup', (event) => {
+                     if (document.pointerLockElement === renderer.domElement || isMobile) {
+                         if (controlledBotIndex !== -1) {
+                            switch(event.key.toLowerCase()) {
+                                case 'w': if (userInput.forward === 1) userInput.forward = 0; break;
+                                case 's': if (userInput.forward === -1) userInput.forward = 0; break;
+                                case 'a': if (userInput.strafe === -1) userInput.strafe = 0; break;
+                                case 'd': if (userInput.strafe === 1) userInput.strafe = 0; break;
+                                case ' ':
+                                    userInput.attemptingJump = false;
+                                    break;
+                            }
+                        }
+                    }
+                    if (pidCharacterElements.body) {
+                        switch(event.key) {
+                            case 'ArrowUp': if (pidCharacterElements.movementDirection.z > 0) pidCharacterElements.movementDirection.z = 0; break;
+                            case 'ArrowDown': if (pidCharacterElements.movementDirection.z < 0) pidCharacterElements.movementDirection.z = 0; break;
+                            case 'ArrowLeft': if (pidCharacterElements.movementDirection.x > 0) pidCharacterElements.movementDirection.x = 0; break;
+                            case 'ArrowRight': if (pidCharacterElements.movementDirection.x < 0) pidCharacterElements.movementDirection.x = 0; break;
+                            case 'PageUp': if (pidCharacterElements.movementDirection.y > 0) pidCharacterElements.movementDirection.y = 0; break;
+                            case 'PageDown': if (pidCharacterElements.movementDirection.y < 0) pidCharacterElements.movementDirection.y = 0; break;
+                        }
+                    }
+                });
+            }
+        }
+        
+        setupInputListeners = adjustedSetupInputListeners; 
+
+        main().then(() => {
+            // Main logic initialized
+        }).catch(error => console.error("Error initializing Rapier testbed:", error));
+        
+
+    </script>
+</body>
+</html>
+
