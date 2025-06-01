@@ -738,21 +738,21 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
 
         const params = {
             gravity: -15.0, playerSpeed: 8.0, playerJumpForce: 9.0,
-            vineSegmentLength: 0.45, vineSegmentRadius: 0.07, numVineSegments: 12,
-            vineForceScale: 55.0, vineDamping: 4.5, vineArmorSpringK: 60.0, vineArmorDampingK: 4.0,
-            bladeForceScale: 45.0, bladeTorqueScale: 1.2, numBlades: 6, bladeOrbitRadiusBase: 2.5, bladeOrbitSpeed: 0.4,
-            bladeReEngageSpeedThreshold: 0.75, bladeReEngageBackupDist: 1.5,
-            showRapierDebug: false, enableHNM: true,
+            vineSegmentLength: 0.2, vineSegmentRadius: 0.2, numVineSegments: 20,
+            vineForceScale: 5.0, vineDamping: 0.1, vineArmorSpringK: 5.0, vineArmorDampingK: 0.1,
+            bladeForceScale: 5.0, bladeTorqueScale: 0.1, numBlades: 10, bladeOrbitRadiusBase: 2.0, bladeOrbitSpeed: 2.0,
+            bladeReEngageSpeedThreshold: 2.0, bladeReEngageBackupDist: 5.0,
+            showRapierDebug: true, enableHNM: false,
             resetSimulation: () => initDemo(true), 
             vineHnmLR: 0.00025, bladeHnmLR: 0.0003,
-            bciTargetDistance: 15.0, mouseSensitivity: 0.0022,
-            bciCoherenceBuildRate: 0.025, bciCoherenceDecayRate: 0.015, bciAimStabilityThreshold: 0.04,
+            bciTargetDistance: 50.0, mouseSensitivity: 0.0022,
+            bciCoherenceBuildRate: 0.025, bciCoherenceDecayRate: 0.015, bciAimStabilityThreshold: 0.2,
             bciCoherenceBladeDeployThreshold: 0.35, bciCoherenceMinActionThreshold: 0.25, 
             deployOneBlade: () => deployBlades(1),
             recallAllBlades: () => recallAllBladesFunction(),
             toggleDirectVineControl: () => { userInput.isDirectControllingVine = !userInput.isDirectControllingVine; updateInfoDisplay();},
-            numEnemies: 1, 
-            autoBattleMode: false, 
+            numEnemies: 5, 
+            autoBattleMode: true, 
         };
         
         class BCIEmulationProcessor {
