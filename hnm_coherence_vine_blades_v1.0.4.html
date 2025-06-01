@@ -20,6 +20,8 @@
         .health-bar { width: 100px; height: 10px; background-color: #555; border: 1px solid #777; margin-bottom: 3px; }
         .health-bar-inner { height: 100%; background-color: lightgreen; width: 100%; }
         .health-bar-inner.enemy { background-color: red; }
+        .health-bar-inner.flying-enemy { background-color: orange; }
+
 
         @media (pointer: coarse) {
             #mobile-controls { display: flex; pointer-events: auto; opacity:1;}
@@ -688,6 +690,16 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             const err = "FATAL: hnm_core_v1.0.0.js not loaded. Check script tag.";
             document.getElementById('info').textContent = err; console.error(err); throw new Error(err);
         }
+        String.prototype.hashCode = function() {
+          var hash = 0, i, chr;
+          if (this.length === 0) return hash;
+          for (i = 0; i < this.length; i++) {
+            chr   = this.charCodeAt(i);
+            hash  = ((hash << 5) - hash) + chr;
+            hash |= 0; // Convert to 32bit integer
+          }
+          return hash;
+        };
 
         let RAPIER, world, scene, camera, renderer, stats, gui, eventQueue, physicsLines = null;
         let player = { 
@@ -1119,24 +1131,38 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
 
             enemies = []; 
             const enemyMaterial = new THREE.MeshStandardMaterial({ color: 0xff6666, emissive: 0x441111, roughness:0.8 });
+            const flyingEnemyMaterial = new THREE.MeshStandardMaterial({ color: 0xffaa33, emissive: 0x553300, roughness:0.7 });
+
             for (let i = 0; i < params.numEnemies; i++) {
                 const level = Math.floor(Math.random() * 3) + 1; 
                 const size = 0.5 + level * 0.15; 
                 const enemyMaxHealth = ENEMY_MAX_HEALTH_BASE + (level - 1) * 25; 
                 const enemyDamage = ENEMY_DAMAGE_BASE + (level - 1) * 5; 
+                const isFlyingEnemy = Math.random() < 0.4; // 40% chance to be flying
 
-                const enemyMesh = new THREE.Mesh(new THREE.SphereGeometry(size, 12, 8), enemyMaterial);
+                const enemyMesh = new THREE.Mesh(new THREE.SphereGeometry(size, 12, 8), isFlyingEnemy ? flyingEnemyMaterial : enemyMaterial);
                 enemyMesh.castShadow = true;
                 const spawnX = (Math.random() - 0.5) * 20;
                 const spawnZ = (Math.random() - 0.5) * 20;
-                const enemyBodyDesc = RAPIER.RigidBodyDesc.dynamic()
-                    .setTranslation(spawnX, size, spawnZ)
-                    .setCanSleep(false).setLinearDamping(0.5).setAngularDamping(0.5);
+                let enemyBodyDesc;
+                let spawnY = size;
+
+                if (isFlyingEnemy) {
+                    spawnY = size + 2.0 + Math.random() * 2.0; // Spawn higher
+                    enemyBodyDesc = RAPIER.RigidBodyDesc.kinematicVelocityBased()
+                        .setTranslation(spawnX, spawnY, spawnZ)
+                        .setCanSleep(false);
+                } else {
+                    enemyBodyDesc = RAPIER.RigidBodyDesc.dynamic()
+                        .setTranslation(spawnX, spawnY, spawnZ)
+                        .setCanSleep(false).setLinearDamping(0.5).setAngularDamping(0.5);
+                }
+                
                 const enemyBody = world.createRigidBody(enemyBodyDesc);
                 const enemyCollider = world.createCollider(RAPIER.ColliderDesc.ball(size).setDensity(0.8), enemyBody);
                 enemyCollider.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
-                const enemyId = `enemy_${i}_lvl${level}`;
-                enemyBody.userData = { entityType: "enemy", entityId: enemyId, level: level };
+                const enemyId = `enemy_${i}_lvl${level}${isFlyingEnemy ? '_fly' : ''}`;
+                enemyBody.userData = { entityType: "enemy", entityId: enemyId, level: level, isFlying: isFlyingEnemy };
 
                 enemies.push({
                     id: enemyId,
@@ -1147,6 +1173,7 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
                     maxHealth: enemyMaxHealth,
                     damage: enemyDamage,
                     level: level,
+                    isFlying: isFlyingEnemy,
                     attackCooldown: 0,
                     targetPlayer: true 
                 });
@@ -1158,17 +1185,33 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
 
         function updateEnemies(deltaTime) {
             if (gameOver) return;
+            const time = performance.now() * 0.001; 
             enemies.forEach(enemy => {
                 if (enemy.health <= 0 || !enemy.rigidBody || !player || !player.rigidBody) return;
 
                 const enemyPos = enemy.rigidBody.translation();
                 const playerPosVec = player.rigidBody.translation(); // RAPIER vector
-                const directionToPlayer = new THREE.Vector3(playerPosVec.x - enemyPos.x, 0, playerPosVec.z - enemyPos.z); 
                 
-                if (directionToPlayer.lengthSq() > 0.1) {
-                    directionToPlayer.normalize();
-                    const enemySpeed = 3.0 + enemy.level * 0.5; 
-                    enemy.rigidBody.setLinvel({ x: directionToPlayer.x * enemySpeed, y: enemy.rigidBody.linvel().y, z: directionToPlayer.z * enemySpeed }, true);
+                if (enemy.isFlying) {
+                    const targetFlyHeight = playerPosVec.y + 2.0 + Math.sin(time * 0.3 + enemy.id.hashCode() * 0.1) * 1.5; // Vary height around player
+                    const directionToPlayer3D = new THREE.Vector3(playerPosVec.x - enemyPos.x, targetFlyHeight - enemyPos.y, playerPosVec.z - enemyPos.z);
+                    
+                    if (directionToPlayer3D.lengthSq() > 0.1) {
+                        directionToPlayer3D.normalize();
+                        const enemySpeed = 2.0 + enemy.level * 0.25; 
+                        enemy.rigidBody.setLinvel({ 
+                            x: directionToPlayer3D.x * enemySpeed, 
+                            y: directionToPlayer3D.y * enemySpeed, 
+                            z: directionToPlayer3D.z * enemySpeed 
+                        }, true);
+                    }
+                } else { // Ground enemy logic
+                    const directionToPlayer = new THREE.Vector3(playerPosVec.x - enemyPos.x, 0, playerPosVec.z - enemyPos.z); 
+                    if (directionToPlayer.lengthSq() > 0.1) {
+                        directionToPlayer.normalize();
+                        const enemySpeed = 3.0 + enemy.level * 0.5; 
+                        enemy.rigidBody.setLinvel({ x: directionToPlayer.x * enemySpeed, y: enemy.rigidBody.linvel().y, z: directionToPlayer.z * enemySpeed }, true);
+                    }
                 }
 
                 if (enemy.attackCooldown > 0) {
@@ -1225,11 +1268,16 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             enemies.forEach(enemy => {
                 if(enemy.health <= 0) return; 
                 const enemyHealthText = document.createElement('div');
-                enemyHealthText.textContent = `Enemy ${enemy.id.split('_')[1]} (Lvl ${enemy.level}) Health: ${Math.max(0,Math.round(enemy.health))}`;
+                enemyHealthText.textContent = `Enemy ${enemy.id.split('_')[1]}${(enemy.isFlying ? ' (Fly)' : '')} (Lvl ${enemy.level}) Health: ${Math.max(0,Math.round(enemy.health))}`;
                 const enemyBarDiv = document.createElement('div');
                 enemyBarDiv.classList.add('health-bar');
                 const enemyBarInnerDiv = document.createElement('div');
-                enemyBarInnerDiv.classList.add('health-bar-inner', 'enemy');
+                enemyBarInnerDiv.classList.add('health-bar-inner');
+                if (enemy.isFlying) {
+                    enemyBarInnerDiv.classList.add('flying-enemy');
+                } else {
+                    enemyBarInnerDiv.classList.add('enemy');
+                }
                 enemyBarInnerDiv.style.width = `${(enemy.health / enemy.maxHealth) * 100}%`;
                 enemyBarDiv.appendChild(enemyBarInnerDiv);
                 enemiesContainer.appendChild(enemyHealthText);
@@ -1736,7 +1784,10 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
                     if (closestEnemy && closestEnemy.rigidBody) {
                         const enemyPosVec = closestEnemy.rigidBody.translation();
                         const enemyPos = new THREE.Vector3(enemyPosVec.x, enemyPosVec.y, enemyPosVec.z);
-                        bciTargetWorld.set(enemyPos.x, enemyPos.y + 0.5, enemyPos.z); 
+                        let targetYOffset = 0.5;
+                        if (closestEnemy.isFlying) targetYOffset = 1.0 + Math.sin(performance.now() * 0.001 + closestEnemy.id.hashCode() * 0.1) * 0.5;
+
+                        bciTargetWorld.set(enemyPos.x, enemyPos.y + targetYOffset, enemyPos.z); 
 
                         player.autoBattleFaceEnemy = true;
                         player.autoBattleTargetEnemyPos.copy(enemyPos);
@@ -1744,7 +1795,9 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
                         const distanceToEnemy = Math.sqrt(minDistanceSq);
                         const desiredDistance = params.bladeOrbitRadiusBase * 1.8;
                         const directionToEnemyWorld = new THREE.Vector3().subVectors(enemyPos, playerPos);
-                        directionToEnemyWorld.y = 0;
+                        
+                        if (!closestEnemy.isFlying) directionToEnemyWorld.y = 0; // Keep ground player on ground plane for movement target
+                        
                         if(directionToEnemyWorld.lengthSq() > 0.01) directionToEnemyWorld.normalize();
 
 
@@ -1755,7 +1808,8 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
                         } else {
                             player.autoBattleTargetVelocity.set(0,0,0); 
                         }
-                        if (Math.random() < 0.015 && player.isOnGround) userInput.jump = true;
+                        if (!closestEnemy.isFlying && Math.random() < 0.015 && player.isOnGround) userInput.jump = true;
+
 
                         if (distanceToEnemy < params.bciTargetDistance * 0.95 && userInput.bciCoherence > 0.7) {
                             const activeBladesCount = blades.filter(b => !b.isStored).length;
