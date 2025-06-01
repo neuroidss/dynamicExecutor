@@ -21,10 +21,34 @@
         .health-bar-inner { height: 100%; background-color: lightgreen; width: 100%; }
         .health-bar-inner.enemy { background-color: red; }
 
+        /* Added for joysticks */
+        .nipple-zone {
+            position: absolute;
+            width: 120px; 
+            height: 120px;
+            opacity: 0.4; 
+            z-index: 102; /* Above mobile-controls (101) */
+            /* background-color: rgba(128,128,128,0.2); */ /* Optional: for debugging zone */
+        }
+        #joystick-zone-left {
+            bottom: 140px; /* Position above existing mobile buttons which are at bottom: 10px + their height */
+            left: 20px;
+        }
+        #joystick-zone-right {
+            bottom: 140px;
+            right: 20px;
+        }
+
+
         @media (pointer: coarse) {
             #mobile-controls { display: flex; pointer-events: auto; opacity:1;}
             canvas { cursor: default; }
             #info {font-size: 8px;}
+            /* Show joystick zones on touch devices if needed, or they can be always visible if opacity > 0 */
+             .nipple-zone { display: block; }
+        }
+         @media (pointer: fine) { /* Hide joystick zones for mouse users */
+            .nipple-zone { display: none; }
         }
     </style>
 </head>
@@ -55,6 +79,11 @@
             <button id="btn-recall-blades" style="font-size:9px;">Rec.Bl</button>
         </div>
     </div>
+
+    <!-- Joystick Zones -->
+    <div id="joystick-zone-left" class="nipple-zone"></div>
+    <div id="joystick-zone-right" class="nipple-zone"></div>
+
     <div id="bci-target-world-indicator"></div>
     <div id="crosshair"></div>
     
@@ -65,6 +94,8 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+    <!-- NippleJS for Virtual Joysticks -->
+    <script src="https://yoannmoinet.github.io/nipplejs/javascripts/nipplejs.js"></script>
     <script type="text/javascript">
 // hnm_core_v1.js
 // --- Logging Utility (Adapted for Resonant Artifacts context) ---
@@ -1237,6 +1268,47 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             });
         }
 
+        function initJoysticks() {
+            const joystickOptions = {
+                zone: null, 
+                mode: 'static',
+                position: { left: '50%', top: '50%' },
+                color: 'rgba(255,255,255,0.7)',
+                size: 90,
+                threshold: 0.1, 
+                fadeTime: 150
+            };
+            const joystickRotationSensitivity = 0.04;
+
+            const leftZone = document.getElementById('joystick-zone-left');
+            if (leftZone) {
+                const leftJoystick = nipplejs.create({ ...joystickOptions, zone: leftZone });
+                leftJoystick.on('move', (evt, data) => {
+                    if (data.vector) {
+                        userInput.moveForward = -data.vector.y; 
+                        userInput.moveLeft = -data.vector.x; // Assuming -x is left from joystick perspective
+                    }
+                }).on('end', () => {
+                    userInput.moveForward = 0;
+                    userInput.moveLeft = 0;
+                    userInput.moveRight = 0; // Ensure right is also reset, as it's derived from moveLeft
+                    userInput.moveBackward = 0; // Ensure backward is also reset
+                });
+            } else { console.warn("Left joystick zone not found"); }
+
+            const rightZone = document.getElementById('joystick-zone-right');
+            if (rightZone) {
+                const rightJoystick = nipplejs.create({ ...joystickOptions, zone: rightZone });
+                rightJoystick.on('move', (evt, data) => {
+                    if (data.vector) {
+                        userInput.cameraYaw -= data.vector.x * joystickRotationSensitivity;
+                        userInput.cameraPitch -= data.vector.y * joystickRotationSensitivity * 0.7; // Often pitch is less sensitive
+                        userInput.cameraPitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, userInput.cameraPitch));
+                    }
+                });
+            } else { console.warn("Right joystick zone not found"); }
+        }
+
 
         function setupInputListeners() {
             const isTouchDevice = (('ontouchstart' in window) || (navigator.maxTouchPoints > 0) || (navigator.msMaxTouchPoints > 0));
@@ -1246,21 +1318,28 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             };
 
             if (isTouchDevice) {
-                addSafeEventListener(document.getElementById('btn-forward'), 'touchstart', (e)=>{e.preventDefault();userInput.moveForward=1;});
-                addSafeEventListener(document.getElementById('btn-forward'), 'touchend', ()=>{userInput.moveForward=0;});
-                addSafeEventListener(document.getElementById('btn-backward'), 'touchstart', (e)=>{e.preventDefault();userInput.moveBackward=1;});
-                addSafeEventListener(document.getElementById('btn-backward'), 'touchend', ()=>{userInput.moveBackward=0;});
-                addSafeEventListener(document.getElementById('btn-left'), 'touchstart', (e)=>{e.preventDefault();userInput.moveLeft=1;});
-                addSafeEventListener(document.getElementById('btn-left'), 'touchend', ()=>{userInput.moveLeft=0;});
-                addSafeEventListener(document.getElementById('btn-right'), 'touchstart', (e)=>{e.preventDefault();userInput.moveRight=1;});
-                addSafeEventListener(document.getElementById('btn-right'), 'touchend', ()=>{userInput.moveRight=0;});
+                initJoysticks(); // Initialize virtual joysticks for touch devices
+
+                addSafeEventListener(document.getElementById('btn-cam-left'), 'touchstart', (e)=>{e.preventDefault();userInput.cameraYaw += params.mouseSensitivity * 30;}); // Increased sensitivity for button tap
+                addSafeEventListener(document.getElementById('btn-cam-right'), 'touchstart', (e)=>{e.preventDefault();userInput.cameraYaw -= params.mouseSensitivity * 30;});
+                
+                // Note: Movement is now handled by left joystick. 
+                // The individual forward/left/right/backward buttons from mobile-controls are now redundant if joysticks are used for movement.
+                // I'll keep their listeners for now, but ideally one or the other system should be primary.
+                // For this implementation, joystick will override these if active.
+                addSafeEventListener(document.getElementById('btn-forward'), 'touchstart', (e)=>{e.preventDefault(); if(userInput.moveForward === 0) userInput.moveForward=1;});
+                addSafeEventListener(document.getElementById('btn-forward'), 'touchend', ()=>{if(userInput.moveForward > 0) userInput.moveForward=0;});
+                addSafeEventListener(document.getElementById('btn-backward'), 'touchstart', (e)=>{e.preventDefault(); if(userInput.moveBackward === 0) userInput.moveBackward=1;});
+                addSafeEventListener(document.getElementById('btn-backward'), 'touchend', ()=>{if(userInput.moveBackward > 0)userInput.moveBackward=0;});
+                addSafeEventListener(document.getElementById('btn-left'), 'touchstart', (e)=>{e.preventDefault(); if(userInput.moveLeft === 0) userInput.moveLeft=1;});
+                addSafeEventListener(document.getElementById('btn-left'), 'touchend', ()=>{if(userInput.moveLeft > 0)userInput.moveLeft=0;});
+                addSafeEventListener(document.getElementById('btn-right'), 'touchstart', (e)=>{e.preventDefault(); if(userInput.moveRight === 0)userInput.moveRight=1;});
+                addSafeEventListener(document.getElementById('btn-right'), 'touchend', ()=>{if(userInput.moveRight > 0)userInput.moveRight=0;});
+
+
                 addSafeEventListener(document.getElementById('btn-jump'), 'touchstart', (e)=>{e.preventDefault();userInput.jump=true;});
                 addSafeEventListener(document.getElementById('btn-bci-action'), 'touchstart', (e)=>{e.preventDefault();userInput.bciAction=true; if (userInput.isDirectControllingVine) userInput.directControlActionActive = true; });
                 addSafeEventListener(document.getElementById('btn-bci-action'), 'touchend', ()=>{userInput.bciAction=false; userInput.directControlActionActive = false;});
-
-                const camSensitivity = 0.04;
-                addSafeEventListener(document.getElementById('btn-cam-left'), 'touchstart', (e)=>{e.preventDefault();userInput.cameraYaw += camSensitivity;});
-                addSafeEventListener(document.getElementById('btn-cam-right'), 'touchstart', (e)=>{e.preventDefault();userInput.cameraYaw -= camSensitivity;});
 
                 const bciToggleBtn = document.getElementById('btn-bci-target-toggle');
                 addSafeEventListener(bciToggleBtn, 'touchstart', (e)=>{ e.preventDefault(); userInput.isBCITouchAiming = true; if(bciToggleBtn) bciToggleBtn.style.backgroundColor = 'rgba(150,150,80,0.8)'; if(e.touches.length > 0) { userInput.bciTouchStart.x = userInput.bciTouchCurrent.x = e.touches[0].clientX; userInput.bciTouchStart.y = userInput.bciTouchCurrent.y = e.touches[0].clientY; userInput.bciCommandTargetScreen.set(userInput.bciTouchStart.x / window.innerWidth, userInput.bciTouchStart.y / window.innerHeight); userInput.bciCommandTargetLastScreen.copy(userInput.bciCommandTargetScreen); } });
@@ -1342,10 +1421,11 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
                 const playerFlatForward = new THREE.Vector3(Math.sin(userInput.cameraYaw), 0, Math.cos(userInput.cameraYaw)).normalize();
                 const playerRight = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), playerFlatForward).normalize();
 
-                if (userInput.moveForward) moveDirection.add(playerFlatForward);
-                if (userInput.moveBackward) moveDirection.sub(playerFlatForward);
-                if (userInput.moveLeft) moveDirection.add(playerRight);
-                if (userInput.moveRight) moveDirection.sub(playerRight);
+                if (userInput.moveForward > 0) moveDirection.addScaledVector(playerFlatForward, userInput.moveForward);
+                if (userInput.moveBackward > 0) moveDirection.subScaledVector(playerFlatForward, userInput.moveBackward);
+                if (userInput.moveLeft > 0) moveDirection.addScaledVector(playerRight, userInput.moveLeft); // Strafe left
+                if (userInput.moveRight > 0) moveDirection.subScaledVector(playerRight, userInput.moveRight); // Strafe right
+
 
                 moveDirection.normalize().multiplyScalar(params.playerSpeed);
                 let yVel = playerPhysicsLinvel.y;
@@ -1950,7 +2030,7 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             statusText += `Player Health: ${player.health !== undefined ? Math.round(player.health) : 'N/A'}/${PLAYER_MAX_HEALTH} | Enemies Left: ${enemies.filter(e => e.health > 0).length}/${params.numEnemies}<br/>`;
             statusText += `Auto-Battle: ${params.autoBattleMode ? "ON" : "OFF"}<br/>`
             statusText += `Desktop: WASD/Space + Mouse. BCI Aim: Hold Shift. BCI Action: Hold Ctrl+Click (while Shift held). VineDirect: V. Blades: 1 (Deploy), R (Recall).<br/>`;
-            statusText += `Mobile: On-screen controls. BCI Aim: Hold 'BCIAim', BCI Act: Tap 'BCIAct'.`;
+            statusText += `Mobile: Joysticks + On-screen controls. BCI Aim: Hold 'BCIAim', BCI Act: Tap 'BCIAct'.`;
             if (message) statusText += `<br/><i style="color:#ffffaa;">${message}</i>`;
             document.getElementById('info').innerHTML = statusText;
         }
@@ -2075,4 +2155,5 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
     </script>
 </body>
 </html>
+
 
