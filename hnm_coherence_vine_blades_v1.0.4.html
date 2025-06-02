@@ -72,177 +72,591 @@
 
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
     <script type="text/javascript">
-// hnm_core_v1.js (Embedded Content of hnm_core_v1.0.0.js)
-function hnmLog(message, level = "info") { console[level](`[HNM] ${message}`); }
+// hnm_core_v1.js
+// --- Logging Utility (Adapted for Resonant Artifacts context) ---
+function hnmLog(message, level = "info") {
+    console[level](`[HNM] ${message}`);
+}
+
+// --- TensorFlow.js dependent HNM Components ---
+
 class MemoryMLP_TFJS {
     constructor(inputDim, depth, expansionOrTargetDim, namePrefix = '', activation = 'elu') {
-        this.inputDim = inputDim; this.depth = depth; this.namePrefix = namePrefix; this.model = null; this.isDisposed = false;
-        if (depth < 1) { this.isIdentity = true; return; } this.isIdentity = false;
-        const layers = []; let currentLayerInputShape = [this.inputDim];
+        this.inputDim = inputDim;
+        this.depth = depth;
+        this.namePrefix = namePrefix;
+        this.model = null;
+        this.isDisposed = false;
+
+        if (depth < 1) { this.isIdentity = true; return; }
+        this.isIdentity = false;
+
+        const layers = [];
+        let currentLayerInputShape = [this.inputDim];
+
         for (let i = 0; i < depth; i++) {
-            const isLast = i === (depth - 1); let currentLayerOutputUnits;
-            if (depth === 1) { currentLayerOutputUnits = expansionOrTargetDim; } else { currentLayerOutputUnits = isLast ? this.inputDim : Math.floor(this.inputDim * expansionOrTargetDim); }
-            const denseLayerConfig = { units: currentLayerOutputUnits, kernelInitializer: 'glorotUniform', biasInitializer: 'zeros', name: `${namePrefix}_mlp_dense_${i}` };
-            if (i === 0) { denseLayerConfig.inputShape = currentLayerInputShape; } layers.push(tf.layers.dense(denseLayerConfig)); currentLayerInputShape = [currentLayerOutputUnits];
+            const isLast = i === (depth - 1);
+            let currentLayerOutputUnits;
+
+            if (depth === 1) { currentLayerOutputUnits = expansionOrTargetDim; }
+            else { currentLayerOutputUnits = isLast ? this.inputDim : Math.floor(this.inputDim * expansionOrTargetDim); }
+
+            const denseLayerConfig = {
+                units: currentLayerOutputUnits, kernelInitializer: 'glorotUniform',
+                biasInitializer: 'zeros', name: `${namePrefix}_mlp_dense_${i}`
+            };
+            if (i === 0) { denseLayerConfig.inputShape = currentLayerInputShape; }
+            layers.push(tf.layers.dense(denseLayerConfig));
+            currentLayerInputShape = [currentLayerOutputUnits];
+
             if (!isLast) { layers.push(tf.layers.activation({activation: activation, name: `${namePrefix}_mlp_act_${i}`})); }
-        } this.model = tf.sequential({ name: `${namePrefix}_mlp_sequential`, layers });
+        }
+        this.model = tf.sequential({ name: `${namePrefix}_mlp_sequential`, layers });
     }
-    call(inputs) { if (this.isDisposed) throw new Error(`${this.namePrefix} MLP model is disposed.`); if (this.isIdentity) return tf.keep(inputs.clone()); if (!this.model) throw new Error (`MemoryMLP_TFJS (${this.namePrefix}): Model not initialized properly.`); return this.model.apply(inputs); }
-    getWeights() { if (this.isDisposed || this.isIdentity || !this.model) return []; return this.model.getWeights().map(w => tf.keep(w.clone())); }
-    setWeights(weights) { if (this.isDisposed || this.isIdentity || !this.model || !weights || weights.length === 0) return; this.model.setWeights(weights); }
-    getTrainableVariables() { if (this.isDisposed || this.isIdentity || !this.model) return []; return this.model.trainableWeights.map(tw => tw.val); }
-    dispose() { if (this.isDisposed) return; if (this.model && typeof this.model.dispose === 'function') { this.model.dispose(); } this.model = null; this.isDisposed = true; }
+
+    call(inputs) {
+        if (this.isDisposed) throw new Error(`${this.namePrefix} MLP model is disposed.`);
+        if (this.isIdentity) return tf.keep(inputs.clone());
+        if (!this.model) throw new Error (`MemoryMLP_TFJS (${this.namePrefix}): Model not initialized properly.`);
+        return this.model.apply(inputs);
+    }
+
+    getWeights() {
+        if (this.isDisposed || this.isIdentity || !this.model) return [];
+        return this.model.getWeights().map(w => tf.keep(w.clone()));
+    }
+
+    setWeights(weights) {
+        if (this.isDisposed || this.isIdentity || !this.model || !weights || weights.length === 0) return;
+        this.model.setWeights(weights);
+    }
+
+    getTrainableVariables() {
+        if (this.isDisposed || this.isIdentity || !this.model) return [];
+        return this.model.trainableWeights.map(tw => tw.val);
+    }
+
+    dispose() {
+        if (this.isDisposed) return;
+        if (this.model && typeof this.model.dispose === 'function') { this.model.dispose(); }
+        this.model = null; this.isDisposed = true;
+    }
 }
-function createNeuralMemState(seq_index = 0, layerWeights = {}, optim_state = {}) { return { seq_index, layerWeights, optim_state }; }
+
+function createNeuralMemState(seq_index = 0, layerWeights = {}, optim_state = {}) {
+    return { seq_index, layerWeights, optim_state };
+}
+
 function memStateDetach(state) {
-    if (!state) return null; const detachedLayerWeights = {};
+    if (!state) return null;
+    const detachedLayerWeights = {};
     for (const key in state.layerWeights) {
-        if (Array.isArray(state.layerWeights[key])) { detachedLayerWeights[key] = state.layerWeights[key].map(t => { if (t && !t.isDisposed) return tf.keep(t.clone()); hnmLog(`Warning: memStateDetach found disposed or null tensor for weight key ${key}. Returning null for this tensor.`, "warn"); return null; }).filter(t => t !== null);
-        } else { hnmLog(`Warning: memStateDetach encountered non-array weights for key ${key}`, "warn"); detachedLayerWeights[key] = []; }
-    } const detachedOptimState = JSON.parse(JSON.stringify(state.optim_state || {})); return createNeuralMemState(state.seq_index, detachedLayerWeights, detachedOptimState);
+        if (Array.isArray(state.layerWeights[key])) {
+            detachedLayerWeights[key] = state.layerWeights[key].map(t => {
+                if (t && !t.isDisposed) return tf.keep(t.clone());
+                hnmLog(`Warning: memStateDetach found disposed or null tensor for weight key ${key}. Returning null for this tensor.`, "warn");
+                return null;
+            }).filter(t => t !== null);
+        } else {
+            hnmLog(`Warning: memStateDetach encountered non-array weights for key ${key}`, "warn");
+            detachedLayerWeights[key] = [];
+        }
+    }
+    const detachedOptimState = JSON.parse(JSON.stringify(state.optim_state || {}));
+    return createNeuralMemState(state.seq_index, detachedLayerWeights, detachedOptimState);
 }
+
 function disposeMemStateWeights(state) {
-    if (state && state.layerWeights) { for (const key in state.layerWeights) { if (Array.isArray(state.layerWeights[key])) { state.layerWeights[key].forEach(t => { if (t && !t.isDisposed) t.dispose(); }); } } state.layerWeights = {}; }
+    if (state && state.layerWeights) {
+        for (const key in state.layerWeights) {
+            if (Array.isArray(state.layerWeights[key])) {
+                state.layerWeights[key].forEach(t => { if (t && !t.isDisposed) t.dispose(); });
+            }
+        }
+        state.layerWeights = {};
+    }
 }
+
 function disposeHnsResultsTensors(hnsResults) {
-    if (!hnsResults) return; const tensorDictionaries = [hnsResults.anomalies, hnsResults.weightChanges, hnsResults.buNorms, hnsResults.tdNorms, hnsResults.extNorms];
-    tensorDictionaries.forEach(dict => { if (dict) { Object.values(dict).forEach(tensor => { if (tensor && !tensor.isDisposed && typeof tensor.dispose === 'function') { tensor.dispose(); } }); } });
+    if (!hnsResults) return;
+    const tensorDictionaries = [
+        hnsResults.anomalies,
+        hnsResults.weightChanges,
+        hnsResults.buNorms,
+        hnsResults.tdNorms,
+        hnsResults.extNorms
+    ];
+    tensorDictionaries.forEach(dict => {
+        if (dict) {
+            Object.values(dict).forEach(tensor => {
+                if (tensor && !tensor.isDisposed && typeof tensor.dispose === 'function') {
+                    tensor.dispose();
+                }
+            });
+        }
+    });
 }
+
+
 class NMM_TD_V5_TFJS {
     constructor(config) {
-        this.levelName = config.name; this.dim = config.dim; this.buInputDims = { ...(config.bu_input_dims || {}) }; this.tdInputDims = { ...(config.td_input_dims || {}) };
-        this.nmmParams = { mem_model_depth: 2, mem_model_expansion: 2.0, learning_rate: 0.000, weight_decay: 0.000, beta1: 0.9, beta2: 0.999, max_grad_norm: 1.0, external_signal_dim: config.nmm_params?.external_signal_dim || 0, external_signal_role: config.nmm_params?.external_signal_role || 'none', verbose: config.nmm_params?.verbose || false, ...(config.nmm_params || {}) };
-        if (this.nmmParams.learning_rate === 0 && this.nmmParams.verbose) hnmLog(`NMM_TD_V5_TFJS (${this.levelName}): LR is 0, training ops will be skipped.`);
-        this.memoryModel = new MemoryMLP_TFJS(this.dim, this.nmmParams.mem_model_depth, (this.nmmParams.mem_model_depth === 1) ? this.dim : this.nmmParams.mem_model_expansion, `${this.levelName}_mem_mlp`);
+        this.levelName = config.name; this.dim = config.dim;
+        this.buInputDims = { ...(config.bu_input_dims || {}) };
+        this.tdInputDims = { ...(config.td_input_dims || {}) };
+
+        this.nmmParams = {
+            mem_model_depth: 2,
+            mem_model_expansion: 2.0,
+            learning_rate: 0.000, // Effectively no training for this integration by default
+            weight_decay: 0.000,  // No decay
+            beta1: 0.9,
+            beta2: 0.999,
+            max_grad_norm: 1.0,
+            external_signal_dim: config.nmm_params?.external_signal_dim || 0,
+            external_signal_role: config.nmm_params?.external_signal_role || 'none',
+            verbose: config.nmm_params?.verbose || false,
+            ...(config.nmm_params || {}) // Allow overrides
+        };
+        if (this.nmmParams.learning_rate === 0) {
+             if(this.nmmParams.verbose) hnmLog(`NMM_TD_V5_TFJS (${this.levelName}): LR is 0, training ops will be skipped.`);
+        }
+
+        this.memoryModel = new MemoryMLP_TFJS(
+            this.dim,
+            this.nmmParams.mem_model_depth,
+            (this.nmmParams.mem_model_depth === 1) ? this.dim : this.nmmParams.mem_model_expansion,
+            `${this.levelName}_mem_mlp`
+        );
         this.toValueTarget = new MemoryMLP_TFJS(this.dim, 1, this.dim, `${this.levelName}_val_proj`);
-        this.buProjections = {}; for (const name in this.buInputDims) { this.buProjections[name] = new MemoryMLP_TFJS(this.buInputDims[name], 1, this.dim, `${this.levelName}_bu_proj_${name}`); }
-        this.tdProjections = {}; for (const name in this.tdInputDims) { this.tdProjections[name] = new MemoryMLP_TFJS(this.tdInputDims[name], 1, this.dim, `${this.levelName}_td_proj_${name}`); }
-        this.externalSignalProjection = null; if (this.nmmParams.external_signal_dim > 0 && this.nmmParams.external_signal_role !== 'none') { this.externalSignalProjection = new MemoryMLP_TFJS(this.nmmParams.external_signal_dim, 1, this.dim, `${this.levelName}_ext_proj`); }
+
+        this.buProjections = {};
+        for (const name in this.buInputDims) { this.buProjections[name] = new MemoryMLP_TFJS(this.buInputDims[name], 1, this.dim, `${this.levelName}_bu_proj_${name}`); }
+        this.tdProjections = {};
+        for (const name in this.tdInputDims) { this.tdProjections[name] = new MemoryMLP_TFJS(this.tdInputDims[name], 1, this.dim, `${this.levelName}_td_proj_${name}`); }
+
+        this.externalSignalProjection = null;
+        if (this.nmmParams.external_signal_dim > 0 && this.nmmParams.external_signal_role !== 'none') {
+            this.externalSignalProjection = new MemoryMLP_TFJS(this.nmmParams.external_signal_dim, 1, this.dim, `${this.levelName}_ext_proj`);
+        }
+
         this.lossFn = (labels, predictions) => tf.losses.meanSquaredError(labels, predictions);
-        if (this.nmmParams.learning_rate > 0) { this.optimizer = tf.train.adam(this.nmmParams.learning_rate, this.nmmParams.beta1, this.nmmParams.beta2, 1e-7); } else { this.optimizer = null; }
-        if(this.nmmParams.verbose) hnmLog(`NMM_TD_V5_TFJS (${this.levelName}): Dim=${this.dim}, ExtDim=${this.nmmParams.external_signal_dim}, Role=${this.nmmParams.external_signal_role}, LR=${this.nmmParams.learning_rate.toExponential(2)}`); this.isDisposed = false;
+        if (this.nmmParams.learning_rate > 0) {
+            this.optimizer = tf.train.adam(this.nmmParams.learning_rate, this.nmmParams.beta1, this.nmmParams.beta2, 1e-7);
+        } else {
+            this.optimizer = null; // No optimizer if not learning
+        }
+        if(this.nmmParams.verbose) hnmLog(`NMM_TD_V5_TFJS (${this.levelName}): Dim=${this.dim}, ExtDim=${this.nmmParams.external_signal_dim}, Role=${this.nmmParams.external_signal_role}, LR=${this.nmmParams.learning_rate.toExponential(2)}`);
+        this.isDisposed = false;
     }
+
     _getLayerWeights() {
-        if (this.isDisposed) throw new Error(`${this.levelName} NMM is disposed.`); const weights = { memoryModel: this.memoryModel.getWeights(), toValueTarget: this.toValueTarget.getWeights() };
-        for (const name in this.buProjections) { weights[`buProj_${name}`] = this.buProjections[name].getWeights(); } for (const name in this.tdProjections) { weights[`tdProj_${name}`] = this.tdProjections[name].getWeights(); }
-        if (this.externalSignalProjection) { weights.externalSignalProjection = this.externalSignalProjection.getWeights(); } return weights;
+        if (this.isDisposed) throw new Error(`${this.levelName} NMM is disposed.`);
+        const weights = { memoryModel: this.memoryModel.getWeights(), toValueTarget: this.toValueTarget.getWeights() };
+        for (const name in this.buProjections) { weights[`buProj_${name}`] = this.buProjections[name].getWeights(); }
+        for (const name in this.tdProjections) { weights[`tdProj_${name}`] = this.tdProjections[name].getWeights(); }
+        if (this.externalSignalProjection) { weights.externalSignalProjection = this.externalSignalProjection.getWeights(); }
+        return weights;
     }
+
     _applyLayerWeights(layerWeights) {
-        if (this.isDisposed) throw new Error(`${this.levelName} NMM is disposed.`); if (!layerWeights) return; const tempClonedWeights = {};
-        for (const key in layerWeights) { if (Array.isArray(layerWeights[key])) { tempClonedWeights[key] = layerWeights[key].map(t => t && !t.isDisposed ? t.clone() : null).filter(t => t); } }
-        this.memoryModel.setWeights(tempClonedWeights.memoryModel || []); this.toValueTarget.setWeights(tempClonedWeights.toValueTarget || []);
-        for (const name in this.buProjections) { this.buProjections[name].setWeights(tempClonedWeights[`buProj_${name}`] || []); } for (const name in this.tdProjections) { this.tdProjections[name].setWeights(tempClonedWeights[`tdProj_${name}`] || []); }
+        if (this.isDisposed) throw new Error(`${this.levelName} NMM is disposed.`);
+        if (!layerWeights) return;
+
+        const tempClonedWeights = {};
+        for (const key in layerWeights) {
+            if (Array.isArray(layerWeights[key])) {
+                tempClonedWeights[key] = layerWeights[key].map(t => t && !t.isDisposed ? t.clone() : null).filter(t => t);
+            }
+        }
+
+        this.memoryModel.setWeights(tempClonedWeights.memoryModel || []);
+        this.toValueTarget.setWeights(tempClonedWeights.toValueTarget || []);
+        for (const name in this.buProjections) { this.buProjections[name].setWeights(tempClonedWeights[`buProj_${name}`] || []); }
+        for (const name in this.tdProjections) { this.tdProjections[name].setWeights(tempClonedWeights[`tdProj_${name}`] || []); }
         if (this.externalSignalProjection && tempClonedWeights.externalSignalProjection) { this.externalSignalProjection.setWeights(tempClonedWeights.externalSignalProjection || []); }
-        for (const key in tempClonedWeights) { if (Array.isArray(tempClonedWeights[key])) { tempClonedWeights[key].forEach(t => { if (t && !t.isDisposed) t.dispose(); }); } }
+
+        for (const key in tempClonedWeights) {
+            if (Array.isArray(tempClonedWeights[key])) {
+                tempClonedWeights[key].forEach(t => { if (t && !t.isDisposed) t.dispose(); });
+            }
+        }
     }
-    getInitialState() { if (this.isDisposed) throw new Error(`${this.levelName} NMM is disposed.`); return createNeuralMemState(0, this._getLayerWeights(), { lr: this.nmmParams.learning_rate, wd: this.nmmParams.weight_decay }); }
-    _calculateWeightChange(oldWeightsMap, newWeightsMap) {
-        return tf.tidy(`${this.levelName}_WeightChange`,() => { if (this.nmmParams.learning_rate === 0) return tf.keep(tf.tensor(0.0)); let totalDiffSqSum = tf.tensor(0.0);
-            for (const key in newWeightsMap) { const oldWArray = oldWeightsMap[key]; const newWArray = newWeightsMap[key];
-                if (oldWArray && newWArray && oldWArray.length === newWArray.length) { for (let i = 0; i < newWArray.length; i++) { const oldW = oldWArray[i]; const newW = newWArray[i];
-                        if (oldW && newW && !oldW.isDisposed && !newW.isDisposed && oldW.shape.toString() === newW.shape.toString()) { const diff = newW.sub(oldW); totalDiffSqSum = totalDiffSqSum.add(diff.square().sum()); diff.dispose();
-                        } else { if(this.nmmParams.verbose) hnmLog(`Warning: Tensor mismatch or disposal during weight change calc for ${key}[${i}]`, "warn"); } } } } return tf.keep(totalDiffSqSum.sqrt()); });
+
+    getInitialState() {
+        if (this.isDisposed) throw new Error(`${this.levelName} NMM is disposed.`);
+        return createNeuralMemState(0, this._getLayerWeights(), { lr: this.nmmParams.learning_rate, wd: this.nmmParams.weight_decay });
     }
+
+   _calculateWeightChange(oldWeightsMap, newWeightsMap) {
+        return tf.tidy(`${this.levelName}_WeightChange`,() => {
+            if (this.nmmParams.learning_rate === 0) return tf.keep(tf.tensor(0.0)); // No change if not learning
+
+            let totalDiffSqSum = tf.tensor(0.0);
+             for (const key in newWeightsMap) {
+                 const oldWArray = oldWeightsMap[key]; const newWArray = newWeightsMap[key];
+                 if (oldWArray && newWArray && oldWArray.length === newWArray.length) {
+                     for (let i = 0; i < newWArray.length; i++) {
+                         const oldW = oldWArray[i]; const newW = newWArray[i];
+                         if (oldW && newW && !oldW.isDisposed && !newW.isDisposed && oldW.shape.toString() === newW.shape.toString()) {
+                             const diff = newW.sub(oldW);
+                             totalDiffSqSum = totalDiffSqSum.add(diff.square().sum());
+                             diff.dispose();
+                         } else { if(this.nmmParams.verbose) hnmLog(`Warning: Tensor mismatch or disposal during weight change calc for ${key}[${i}]`, "warn"); }
+                     }
+                 }
+             }
+            return tf.keep(totalDiffSqSum.sqrt());
+        });
+    }
+
+
     forwardStep(buInputs, tdSignals, currentState, externalSignal = null, detachNextState = true) {
-        if (this.isDisposed) throw new Error(`${this.levelName} NMM is disposed.`); const oldWeightsForChangeCalc = (this.nmmParams.learning_rate > 0) ? this._getLayerWeights() : null; this._applyLayerWeights(currentState.layerWeights);
+        if (this.isDisposed) throw new Error(`${this.levelName} NMM is disposed.`);
+
+        const oldWeightsForChangeCalc = (this.nmmParams.learning_rate > 0) ? this._getLayerWeights() : null;
+        this._applyLayerWeights(currentState.layerWeights);
+
         const resultsTidy = tf.tidy(`${this.levelName}_NMM_ForwardStep`, () => {
             const preparedInputs = tf.tidy(`${this.levelName}_InputPrep`, () => {
-                const projectedBuSignals = []; for (const name in buInputs) { if (this.buProjections[name] && buInputs[name] && !buInputs[name].isDisposed && buInputs[name].shape) { projectedBuSignals.push(this.buProjections[name].call(buInputs[name].reshape([-1, this.buInputDims[name]]))); } else { if(this.nmmParams.verbose) hnmLog(`Warning: Skipping BU input for ${name} in ${this.levelName}. Using zeros.`, "warn"); projectedBuSignals.push(tf.zeros([1, this.dim])); } }
-                const combBu = projectedBuSignals.length > 0 ? tf.addN(projectedBuSignals) : tf.zeros([1, this.dim]); projectedBuSignals.forEach(t => {if (t && !t.isDisposed) t.dispose(); }); const cBuNorm = tf.norm(combBu);
-                const projectedTdSignals = []; for (const name in tdSignals) { if (this.tdProjections[name] && tdSignals[name] && !tdSignals[name].isDisposed && tdSignals[name].shape) { projectedTdSignals.push(this.tdProjections[name].call(tdSignals[name].reshape([-1, this.tdInputDims[name]]))); } else { if(this.nmmParams.verbose) hnmLog(`Warning: Skipping TD input for ${name} in ${this.levelName}. Using zeros.`, "warn"); projectedTdSignals.push(tf.zeros([1, this.dim])); } }
-                const combTd = projectedTdSignals.length > 0 ? tf.addN(projectedTdSignals) : tf.zeros([1, this.dim]); projectedTdSignals.forEach(t => {if (t && !t.isDisposed) t.dispose(); }); const cTdNorm = tf.norm(combTd);
-                let projExtSig = null; let cExtNorm = tf.tensor(0.0);
-                if (this.nmmParams.external_signal_role !== 'none' && this.externalSignalProjection) {
-                    if (externalSignal && !externalSignal.isDisposed && externalSignal.shape && externalSignal.shape.length === 3 && externalSignal.shape[externalSignal.shape.length -1] === this.nmmParams.external_signal_dim) { projExtSig = this.externalSignalProjection.call(externalSignal.reshape([-1, this.nmmParams.external_signal_dim]));
-                    } else { if(this.nmmParams.verbose && externalSignal) hnmLog(`Warning: External signal for ${this.levelName} invalid. Using zeros. Expected dim ${this.nmmParams.external_signal_dim}, got shape ${externalSignal?.shape}`, "warn"); else if (this.nmmParams.verbose && !externalSignal && this.nmmParams.external_signal_dim > 0) hnmLog(`Warning: External signal for ${this.levelName} missing. Using zeros. Expected dim ${this.nmmParams.external_signal_dim}`, "warn"); projExtSig = tf.zeros([1, this.dim]); }
-                    cExtNorm.dispose(); cExtNorm = tf.norm(projExtSig);
+                const projectedBuSignals = [];
+                for (const name in buInputs) {
+                    if (this.buProjections[name] && buInputs[name] && !buInputs[name].isDisposed && buInputs[name].shape) {
+                        projectedBuSignals.push(this.buProjections[name].call(buInputs[name].reshape([-1, this.buInputDims[name]])));
+                    } else {
+                        if(this.nmmParams.verbose) hnmLog(`Warning: Skipping BU input for ${name} in ${this.levelName}. Using zeros.`, "warn");
+                        projectedBuSignals.push(tf.zeros([1, this.dim]));
+                    }
                 }
-                let keyBaseForPredictionTarget = combBu.clone(); if (this.nmmParams.external_signal_role === 'add_to_bu' && projExtSig) { keyBaseForPredictionTarget = keyBaseForPredictionTarget.add(projExtSig); }
-                let mInput = combBu.add(combTd); if (this.nmmParams.external_signal_role === 'add_to_bu' && projExtSig) { mInput = mInput.add(projExtSig); } else if (this.nmmParams.external_signal_role === 'add_to_td' && projExtSig) { mInput = mInput.add(projExtSig); }
-                let fValTarget = this.toValueTarget.call(keyBaseForPredictionTarget); if (this.nmmParams.external_signal_role === 'add_to_target' && projExtSig) { fValTarget = fValTarget.add(projExtSig); }
+                const combBu = projectedBuSignals.length > 0 ? tf.addN(projectedBuSignals) : tf.zeros([1, this.dim]);
+                projectedBuSignals.forEach(t => {if (t && !t.isDisposed) t.dispose(); });
+                const cBuNorm = tf.norm(combBu);
+
+                const projectedTdSignals = [];
+                for (const name in tdSignals) {
+                    if (this.tdProjections[name] && tdSignals[name] && !tdSignals[name].isDisposed && tdSignals[name].shape) {
+                        projectedTdSignals.push(this.tdProjections[name].call(tdSignals[name].reshape([-1, this.tdInputDims[name]])));
+                    } else {
+                       if(this.nmmParams.verbose) hnmLog(`Warning: Skipping TD input for ${name} in ${this.levelName}. Using zeros.`, "warn");
+                       projectedTdSignals.push(tf.zeros([1, this.dim]));
+                    }
+                }
+                const combTd = projectedTdSignals.length > 0 ? tf.addN(projectedTdSignals) : tf.zeros([1, this.dim]);
+                projectedTdSignals.forEach(t => {if (t && !t.isDisposed) t.dispose(); });
+                const cTdNorm = tf.norm(combTd);
+
+                let projExtSig = null;
+                let cExtNorm = tf.tensor(0.0);
+                if (this.nmmParams.external_signal_role !== 'none' && this.externalSignalProjection) {
+                    if (externalSignal && !externalSignal.isDisposed && externalSignal.shape && externalSignal.shape.length === 3 && externalSignal.shape[externalSignal.shape.length -1] === this.nmmParams.external_signal_dim) {
+                       projExtSig = this.externalSignalProjection.call(externalSignal.reshape([-1, this.nmmParams.external_signal_dim]));
+                    } else {
+                        if(this.nmmParams.verbose && externalSignal) hnmLog(`Warning: External signal for ${this.levelName} invalid. Using zeros. Expected dim ${this.nmmParams.external_signal_dim}, got shape ${externalSignal?.shape}`, "warn");
+                        else if (this.nmmParams.verbose && !externalSignal && this.nmmParams.external_signal_dim > 0) hnmLog(`Warning: External signal for ${this.levelName} missing. Using zeros. Expected dim ${this.nmmParams.external_signal_dim}`, "warn");
+                        projExtSig = tf.zeros([1, this.dim]);
+                    }
+                    cExtNorm.dispose();
+                    cExtNorm = tf.norm(projExtSig);
+                }
+
+                let keyBaseForPredictionTarget = combBu.clone();
+                if (this.nmmParams.external_signal_role === 'add_to_bu' && projExtSig) {
+                    keyBaseForPredictionTarget = keyBaseForPredictionTarget.add(projExtSig);
+                }
+
+                let mInput = combBu.add(combTd);
+                if (this.nmmParams.external_signal_role === 'add_to_bu' && projExtSig) {
+                    mInput = mInput.add(projExtSig);
+                } else if (this.nmmParams.external_signal_role === 'add_to_td' && projExtSig) {
+                    mInput = mInput.add(projExtSig);
+                }
+
+                let fValTarget = this.toValueTarget.call(keyBaseForPredictionTarget);
+                if (this.nmmParams.external_signal_role === 'add_to_target' && projExtSig) {
+                    fValTarget = fValTarget.add(projExtSig);
+                }
                 if (projExtSig && projExtSig !== externalSignal && !projExtSig.isDisposed && projExtSig.rank > 0) projExtSig.dispose();
+
                 return { memInput: mInput, finalValTarget: fValTarget, currentBuNorm: cBuNorm, currentTdNorm: cTdNorm, currentExtNorm: cExtNorm };
             });
-            const keptBuNorm = tf.keep(preparedInputs.currentBuNorm); const keptTdNorm = tf.keep(preparedInputs.currentTdNorm); const keptExtNorm = tf.keep(preparedInputs.currentExtNorm);
-            const predictionBeforeTrain = this.memoryModel.call(preparedInputs.memInput); const keptPredictionForOutput = tf.keep(predictionBeforeTrain.clone().reshape([1, 1, this.dim]));
+
+            const keptBuNorm = tf.keep(preparedInputs.currentBuNorm);
+            const keptTdNorm = tf.keep(preparedInputs.currentTdNorm);
+            const keptExtNorm = tf.keep(preparedInputs.currentExtNorm);
+
+            const predictionBeforeTrain = this.memoryModel.call(preparedInputs.memInput);
+            const keptPredictionForOutput = tf.keep(predictionBeforeTrain.clone().reshape([1, 1, this.dim]));
+
             let currentLossTensor = tf.tensor(0.0);
+
             if (this.optimizer && this.nmmParams.learning_rate > 0) {
-                const trainableVarsForOptimizer = []; this.memoryModel.getTrainableVariables().forEach(v => trainableVarsForOptimizer.push(v));
-                if (this.externalSignalProjection && this.nmmParams.external_signal_role !== 'none' && this.nmmParams.external_signal_dim > 0) { this.externalSignalProjection.getTrainableVariables().forEach(v => trainableVarsForOptimizer.push(v)); }
+                const trainableVarsForOptimizer = [];
+                this.memoryModel.getTrainableVariables().forEach(v => trainableVarsForOptimizer.push(v));
+                if (this.externalSignalProjection && this.nmmParams.external_signal_role !== 'none' && this.nmmParams.external_signal_dim > 0) {
+                     this.externalSignalProjection.getTrainableVariables().forEach(v => trainableVarsForOptimizer.push(v));
+                }
+
                 if (trainableVarsForOptimizer.length > 0) {
-                    const calculateLossFn = () => { const currentPred = this.memoryModel.call(preparedInputs.memInput); let mseLoss = this.lossFn(preparedInputs.finalValTarget, currentPred);
-                        if (this.nmmParams.weight_decay > 0) { let l2Loss = tf.tensor(0.0); trainableVarsForOptimizer.forEach(v => { if (v.name.includes('kernel')) { l2Loss = l2Loss.add(v.square().sum()); } }); mseLoss = mseLoss.add(l2Loss.mul(this.nmmParams.weight_decay / 2)); l2Loss.dispose(); } return mseLoss; };
+                    const calculateLossFn = () => {
+                        const currentPred = this.memoryModel.call(preparedInputs.memInput);
+                        let mseLoss = this.lossFn(preparedInputs.finalValTarget, currentPred);
+                        if (this.nmmParams.weight_decay > 0) {
+                            let l2Loss = tf.tensor(0.0);
+                            trainableVarsForOptimizer.forEach(v => { if (v.name.includes('kernel')) { l2Loss = l2Loss.add(v.square().sum()); } });
+                            mseLoss = mseLoss.add(l2Loss.mul(this.nmmParams.weight_decay / 2));
+                            l2Loss.dispose();
+                        }
+                        return mseLoss;
+                    };
+
                     if (this.nmmParams.max_grad_norm && this.nmmParams.max_grad_norm > 0) {
-                        const {value, grads} = this.optimizer.computeGradients(calculateLossFn, trainableVarsForOptimizer); currentLossTensor.dispose(); currentLossTensor = value ? tf.keep(value) : tf.keep(tf.tensor(0.0));
-                        if (grads) { const gradArray = trainableVarsForOptimizer.map(v => grads[v.name]).filter(g => g && !g.isDisposed); let finalGradsForApply = {};
-                            if (gradArray.length > 0) { const globalNorm = tf.tidy('globalNormCalc', () => { let totalNormSq = tf.scalar(0.0); for (const grad of gradArray) { totalNormSq = totalNormSq.add(tf.norm(grad).square()); } return totalNormSq.sqrt(); });
-                                const globalNormVal = globalNorm.dataSync()[0]; globalNorm.dispose(); let clipRatioScalar = null; if (globalNormVal > this.nmmParams.max_grad_norm) { clipRatioScalar = tf.scalar(this.nmmParams.max_grad_norm / (globalNormVal + 1e-6)); }
-                                trainableVarsForOptimizer.forEach(v => { if (grads[v.name] && !grads[v.name].isDisposed) { finalGradsForApply[v.name] = clipRatioScalar ? grads[v.name].mul(clipRatioScalar) : grads[v.name].clone(); } }); if (clipRatioScalar) clipRatioScalar.dispose(); }
-                            this.optimizer.applyGradients(finalGradsForApply); trainableVarsForOptimizer.forEach(v => { if (grads[v.name] && !grads[v.name].isDisposed) grads[v.name].dispose(); }); Object.values(finalGradsForApply).forEach(g => {if (g && !g.isDisposed) g.dispose(); });
-                        } else { if(this.nmmParams.verbose) hnmLog(`Warning: Grads object from computeGradients is null/undefined for NMM ${this.levelName}.`, "warn");}
-                    } else { const lossTensorFromOptimizer = this.optimizer.minimize(calculateLossFn, true, trainableVarsForOptimizer); currentLossTensor.dispose(); currentLossTensor = lossTensorFromOptimizer ? tf.keep(lossTensorFromOptimizer) : tf.keep(tf.tensor(0.0)); }
+                        const {value, grads} = this.optimizer.computeGradients(calculateLossFn, trainableVarsForOptimizer);
+                        currentLossTensor.dispose(); currentLossTensor = value ? tf.keep(value) : tf.keep(tf.tensor(0.0));
+                         if (grads) {
+                            const gradArray = trainableVarsForOptimizer.map(v => grads[v.name]).filter(g => g && !g.isDisposed);
+                            let finalGradsForApply = {};
+                            if (gradArray.length > 0) {
+                                const globalNorm = tf.tidy('globalNormCalc', () => { let totalNormSq = tf.scalar(0.0); for (const grad of gradArray) { totalNormSq = totalNormSq.add(tf.norm(grad).square()); } return totalNormSq.sqrt(); });
+                                const globalNormVal = globalNorm.dataSync()[0]; globalNorm.dispose();
+                                let clipRatioScalar = null; if (globalNormVal > this.nmmParams.max_grad_norm) { clipRatioScalar = tf.scalar(this.nmmParams.max_grad_norm / (globalNormVal + 1e-6)); }
+                                trainableVarsForOptimizer.forEach(v => { if (grads[v.name] && !grads[v.name].isDisposed) { finalGradsForApply[v.name] = clipRatioScalar ? grads[v.name].mul(clipRatioScalar) : grads[v.name].clone(); } });
+                                if (clipRatioScalar) clipRatioScalar.dispose();
+                            }
+                            this.optimizer.applyGradients(finalGradsForApply);
+                            trainableVarsForOptimizer.forEach(v => { if (grads[v.name] && !grads[v.name].isDisposed) grads[v.name].dispose(); });
+                            Object.values(finalGradsForApply).forEach(g => {if (g && !g.isDisposed) g.dispose(); });
+                         } else { if(this.nmmParams.verbose) hnmLog(`Warning: Grads object from computeGradients is null/undefined for NMM ${this.levelName}.`, "warn");}
+                    } else {
+                        const lossTensorFromOptimizer = this.optimizer.minimize(calculateLossFn, true, trainableVarsForOptimizer);
+                        currentLossTensor.dispose(); currentLossTensor = lossTensorFromOptimizer ? tf.keep(lossTensorFromOptimizer) : tf.keep(tf.tensor(0.0));
+                    }
                 } else { if(this.nmmParams.verbose) hnmLog(`Warning: No trainable variables for NMM ${this.levelName}. Training skipped.`, "warn"); }
-            } else { currentLossTensor.dispose(); currentLossTensor = tf.keep(this.lossFn(predictionBeforeTrain, preparedInputs.finalValTarget)); }
-            if (preparedInputs.memInput && !preparedInputs.memInput.isDisposed) preparedInputs.memInput.dispose(); if (preparedInputs.finalValTarget && !preparedInputs.finalValTarget.isDisposed) preparedInputs.finalValTarget.dispose();
+            } else {
+                currentLossTensor.dispose();
+                currentLossTensor = tf.keep(this.lossFn(predictionBeforeTrain, preparedInputs.finalValTarget));
+            }
+            if (preparedInputs.memInput && !preparedInputs.memInput.isDisposed) preparedInputs.memInput.dispose();
+            if (preparedInputs.finalValTarget && !preparedInputs.finalValTarget.isDisposed) preparedInputs.finalValTarget.dispose();
+
             return { prediction: keptPredictionForOutput, loss: currentLossTensor, buNorm: keptBuNorm, tdNorm: keptTdNorm, extNorm: keptExtNorm };
         });
-        const retrievedValForOutput = resultsTidy.prediction; const lossVal = resultsTidy.loss; const buNormVal = resultsTidy.buNorm; const tdNormVal = resultsTidy.tdNorm; const extNormVal = resultsTidy.extNorm;
-        let weightChangeVal; let newModelWeightsAfterTraining;
-        if (this.nmmParams.learning_rate > 0 && oldWeightsForChangeCalc) { newModelWeightsAfterTraining = this._getLayerWeights(); weightChangeVal = this._calculateWeightChange(oldWeightsForChangeCalc, newModelWeightsAfterTraining); Object.values(oldWeightsForChangeCalc).forEach(arr => arr.forEach(t => { if (t && !t.isDisposed) t.dispose(); }));
-        } else { weightChangeVal = tf.keep(tf.tensor(0.0)); newModelWeightsAfterTraining = currentState.layerWeights; }
-        const nextStateInterim = createNeuralMemState(currentState.seq_index + 1, newModelWeightsAfterTraining, currentState.optim_state); const nextStateFinal = detachNextState ? memStateDetach(nextStateInterim) : nextStateInterim;
-        if (detachNextState && this.nmmParams.learning_rate > 0 && newModelWeightsAfterTraining !== currentState.layerWeights) { disposeMemStateWeights(nextStateInterim); }
+
+        const retrievedValForOutput = resultsTidy.prediction;
+        const lossVal = resultsTidy.loss;
+        const buNormVal = resultsTidy.buNorm;
+        const tdNormVal = resultsTidy.tdNorm;
+        const extNormVal = resultsTidy.extNorm;
+
+        let weightChangeVal;
+        let newModelWeightsAfterTraining;
+        if (this.nmmParams.learning_rate > 0 && oldWeightsForChangeCalc) {
+            newModelWeightsAfterTraining = this._getLayerWeights();
+            weightChangeVal = this._calculateWeightChange(oldWeightsForChangeCalc, newModelWeightsAfterTraining);
+            Object.values(oldWeightsForChangeCalc).forEach(arr => arr.forEach(t => { if (t && !t.isDisposed) t.dispose(); }));
+        } else {
+            weightChangeVal = tf.keep(tf.tensor(0.0));
+            newModelWeightsAfterTraining = currentState.layerWeights;
+        }
+
+
+        const nextStateInterim = createNeuralMemState(currentState.seq_index + 1, newModelWeightsAfterTraining, currentState.optim_state);
+        const nextStateFinal = detachNextState ? memStateDetach(nextStateInterim) : nextStateInterim;
+        if (detachNextState && this.nmmParams.learning_rate > 0 && newModelWeightsAfterTraining !== currentState.layerWeights) {
+             disposeMemStateWeights(nextStateInterim);
+        } else if (detachNextState && this.nmmParams.learning_rate === 0) {
+            // No disposal needed here if not training, as memStateDetach clones.
+        }
+
+
         return { retrievedVal: retrievedValForOutput, nextState: nextStateFinal, anomalyScore: lossVal, weightChange: weightChangeVal, buNorm: buNormVal, tdNorm: tdNormVal, extNorm: extNormVal };
     }
-    dispose() { if (this.isDisposed) return; this.memoryModel.dispose(); this.toValueTarget.dispose(); Object.values(this.buProjections).forEach(p => p.dispose()); Object.values(this.tdProjections).forEach(p => p.dispose()); if(this.externalSignalProjection) this.externalSignalProjection.dispose(); this.isDisposed = true; hnmLog(`NMM ${this.levelName} disposed.`); }
+
+    dispose() {
+        if (this.isDisposed) return;
+        this.memoryModel.dispose(); this.toValueTarget.dispose();
+        Object.values(this.buProjections).forEach(p => p.dispose()); Object.values(this.tdProjections).forEach(p => p.dispose());
+        if(this.externalSignalProjection) this.externalSignalProjection.dispose();
+        this.isDisposed = true; hnmLog(`NMM ${this.levelName} disposed.`);
+    }
 }
+
+
 class HierarchicalSystemV5_TFJS {
     constructor(levelConfigsHLC, globalSimConfig) {
-        this.levelConfigsOriginal = JSON.parse(JSON.stringify(levelConfigsHLC)); this.globalConfig = globalSimConfig; this.numLevels = 0; this.levels = []; this.levelNameToIndex = {}; this.dims = {}; this.isDisposed = false; this.level_expected_external_details = []; this._initializeLevels();
+        this.levelConfigsOriginal = JSON.parse(JSON.stringify(levelConfigsHLC));
+        this.globalConfig = globalSimConfig;
+        this.numLevels = 0; this.levels = [];
+        this.levelNameToIndex = {}; this.dims = {}; this.isDisposed = false;
+        this.level_expected_external_details = [];
+
+        this._initializeLevels();
     }
+
     _initializeLevels() {
-        hnmLog(`HS_V5_TFJS: Initializing ${this.levelConfigsOriginal.length} levels.`); this.levelConfigsOriginal.forEach((cfg, i) => { if (!cfg.name || !cfg.dim) throw new Error(`Level ${i} config missing name or dim.`); this.levelNameToIndex[cfg.name] = i; this.dims[cfg.name] = cfg.dim; });
+        hnmLog(`HS_V5_TFJS: Initializing ${this.levelConfigsOriginal.length} levels.`);
+        this.levelConfigsOriginal.forEach((cfg, i) => {
+            if (!cfg.name || !cfg.dim) throw new Error(`Level ${i} config missing name or dim.`);
+            this.levelNameToIndex[cfg.name] = i; this.dims[cfg.name] = cfg.dim;
+        });
+
         this.levelConfigsOriginal.forEach((hlc_level_cfg, i) => {
-            const nmmConstructorConfig = { name: hlc_level_cfg.name, dim: hlc_level_cfg.dim, bu_input_dims: {}, td_input_dims: {}, nmm_params: { verbose: this.globalConfig.HNM_VERBOSE || false, learning_rate: 0.000, weight_decay: 0.000, beta1: 0.9, beta2: 0.999, max_grad_norm: 1.0, external_signal_dim: 0, external_signal_role: 'none', mem_model_depth: 2, mem_model_expansion: 2.0, ...(hlc_level_cfg.nmm_params || {}) } };
-            if (!hlc_level_cfg.bu_source_level_names || hlc_level_cfg.bu_source_level_names.length === 0) { if (!hlc_level_cfg.raw_sensory_input_dim || hlc_level_cfg.raw_sensory_input_dim <= 0) { throw new Error(`Lvl '${hlc_level_cfg.name}' is a sensory level but lacks a valid 'raw_sensory_input_dim'.`); } nmmConstructorConfig.bu_input_dims[hlc_level_cfg.name] = hlc_level_cfg.raw_sensory_input_dim;
-            } else { hlc_level_cfg.bu_source_level_names.forEach(srcName => { if (!this.dims[srcName]) throw new Error(`Unknown BU source '${srcName}' for level '${hlc_level_cfg.name}'.`); nmmConstructorConfig.bu_input_dims[srcName] = this.dims[srcName]; }); }
-            if (hlc_level_cfg.td_source_level_names) { hlc_level_cfg.td_source_level_names.forEach(srcName => { if (!this.dims[srcName]) throw new Error(`Unknown TD source '${srcName}' for level '${hlc_level_cfg.name}'.`); nmmConstructorConfig.td_input_dims[srcName] = this.dims[srcName]; }); }
-            let expectedNmmExtSourceName = null; let nmmExtSignalDimForNMM = 0; let nmmExtSignalRoleForNMM = nmmConstructorConfig.nmm_params.external_signal_role;
-            const specificExtConfig = hlc_level_cfg.external_input_config;
-            if (specificExtConfig && typeof specificExtConfig === 'object' && !Array.isArray(specificExtConfig) && specificExtConfig.source_signal_name && specificExtConfig.dim > 0) {
-                expectedNmmExtSourceName = specificExtConfig.source_signal_name; nmmExtSignalDimForNMM = specificExtConfig.dim;
-                if (specificExtConfig.role) { nmmExtSignalRoleForNMM = specificExtConfig.role; } else if (nmmExtSignalDimForNMM > 0 && nmmExtSignalRoleForNMM === 'none') { nmmExtSignalRoleForNMM = 'add_to_bu'; }
-            } else if (specificExtConfig && nmmConstructorConfig.nmm_params.verbose) { hnmLog(`Warning for ${hlc_level_cfg.name}: external_input_config is present but invalid or incomplete. ${JSON.stringify(specificExtConfig)}`, "warn"); }
-            nmmConstructorConfig.nmm_params.external_signal_dim = nmmExtSignalDimForNMM; nmmConstructorConfig.nmm_params.external_signal_role = nmmExtSignalRoleForNMM; this.level_expected_external_details[i] = { name: expectedNmmExtSourceName, dim: nmmExtSignalDimForNMM };
-            this.levels.push(new NMM_TD_V5_TFJS(nmmConstructorConfig));
-        }); this.numLevels = this.levels.length; hnmLog(`HS_V5_TFJS: Initialization complete. ${this.levels.length} levels created.`);
-    }
-    getInitialStates() { if (this.isDisposed) throw new Error(`HNS is disposed.`); return this.levels.map(level => level.getInitialState()); }
-    step(currentBotLevelStates, currentBotLastStepOutputs, sensoryInputs, externalInputsAllSources = {}, detachNextStatesMemory = true) {
-        if (this.isDisposed) throw new Error(`HNS is disposed.`); const nextBotLevelStatesList = new Array(this.numLevels).fill(null); const newlyRetrievedValuesForAllLevelsDict = {}; const stepAnomalies = {}; const stepWeightChanges = {}; const stepBuNorms = {}; const stepTdNorms = {}; const stepExternalNorms = {}; const currentStepIntermediateOutputs = {};
-        for (let i = 0; i < this.numLevels; i++) {
-            const lvlMgr = this.levels[i]; const cfg = this.levelConfigsOriginal[i]; const lvlName = cfg.name; const buSrcNames = cfg.bu_source_level_names || []; const tdSrcNames = cfg.td_source_level_names || []; const currentLevelSpecificState = currentBotLevelStates[i]; const lvlBuIn = {}; const lvlTdIn = {};
-            if (buSrcNames.length === 0) { const rawSensoryDim = cfg.raw_sensory_input_dim; const sensoryInputTensor = sensoryInputs[lvlName];
-                if (sensoryInputTensor && !sensoryInputTensor.isDisposed && sensoryInputTensor.shape && sensoryInputTensor.shape.length === 3 && sensoryInputTensor.shape[0] === 1 && sensoryInputTensor.shape[1] === 1 && sensoryInputTensor.shape[2] === rawSensoryDim) { lvlBuIn[lvlName] = sensoryInputTensor;
-                } else { if(lvlMgr.nmmParams.verbose) hnmLog(`Warning: Sensory input for ${lvlName} is invalid or missing. Using zeros. Expected shape [1,1,${rawSensoryDim}], got ${sensoryInputTensor?.shape}`, "warn"); lvlBuIn[lvlName] = tf.keep(tf.zeros([1, 1, rawSensoryDim])); }
-            } else { buSrcNames.forEach(srcName => { const buSourceOutput = currentStepIntermediateOutputs[srcName]; if (buSourceOutput && !buSourceOutput.isDisposed) { lvlBuIn[srcName] = buSourceOutput; } else { hnmLog(`Warning: Missing BU source output from '${srcName}' for level '${lvlName}' in current step. Using zeros.`, "warn"); lvlBuIn[srcName] = tf.keep(tf.zeros([1, 1, this.dims[srcName]])); } }); }
-            tdSrcNames.forEach(srcName => { const tdSourceOutput = currentBotLastStepOutputs[srcName]?.retrievedVal; if (tdSourceOutput && !tdSourceOutput.isDisposed) { lvlTdIn[srcName] = tdSourceOutput; } else { lvlTdIn[srcName] = tf.keep(tf.zeros([1, 1, this.dims[srcName]])); } });
-            let lvlExtInForNMMStep = null; const expectedExternal = this.level_expected_external_details[i];
-            if (expectedExternal && expectedExternal.name && expectedExternal.dim > 0) { const providedSignal = externalInputsAllSources[expectedExternal.name];
-                if (providedSignal && !providedSignal.isDisposed && providedSignal.shape && providedSignal.shape.length === 3 && providedSignal.shape[0] === 1 && providedSignal.shape[1] === 1 && providedSignal.shape[2] === expectedExternal.dim) { lvlExtInForNMMStep = providedSignal;
-                } else { if(lvlMgr.nmmParams.verbose) hnmLog(`Warning for ${lvlName}: External signal '${expectedExternal.name}' invalid or missing from externalInputsAllSources. Using zeros. Expected dim ${expectedExternal.dim}, got ${providedSignal?.shape}`, "warn"); lvlExtInForNMMStep = tf.keep(tf.zeros([1,1,expectedExternal.dim])); }
+            const nmmConstructorConfig = {
+                name: hlc_level_cfg.name,
+                dim: hlc_level_cfg.dim,
+                bu_input_dims: {},
+                td_input_dims: {},
+                nmm_params: {
+                    verbose: this.globalConfig.HNM_VERBOSE || false,
+                    learning_rate: 0.000, // Defaulting to no learning for this integration
+                    weight_decay: 0.000,
+                    beta1: 0.9, beta2: 0.999, max_grad_norm: 1.0,
+                    external_signal_dim: 0, external_signal_role: 'none',
+                    mem_model_depth: 2, mem_model_expansion: 2.0,
+                    ...(hlc_level_cfg.nmm_params || {})
+                }
+            };
+
+            if (!hlc_level_cfg.bu_source_level_names || hlc_level_cfg.bu_source_level_names.length === 0) {
+                if (!hlc_level_cfg.raw_sensory_input_dim || hlc_level_cfg.raw_sensory_input_dim <= 0) {
+                    throw new Error(`Lvl '${hlc_level_cfg.name}' is a sensory level but lacks a valid 'raw_sensory_input_dim'.`);
+                }
+                nmmConstructorConfig.bu_input_dims[hlc_level_cfg.name] = hlc_level_cfg.raw_sensory_input_dim;
+            } else {
+                hlc_level_cfg.bu_source_level_names.forEach(srcName => {
+                    if (!this.dims[srcName]) throw new Error(`Unknown BU source '${srcName}' for level '${hlc_level_cfg.name}'.`);
+                    nmmConstructorConfig.bu_input_dims[srcName] = this.dims[srcName];
+                });
             }
+            if (hlc_level_cfg.td_source_level_names) {
+                 hlc_level_cfg.td_source_level_names.forEach(srcName => {
+                    if (!this.dims[srcName]) throw new Error(`Unknown TD source '${srcName}' for level '${hlc_level_cfg.name}'.`);
+                    nmmConstructorConfig.td_input_dims[srcName] = this.dims[srcName];
+                });
+            }
+
+            let expectedNmmExtSourceName = null;
+            let nmmExtSignalDimForNMM = 0;
+            let nmmExtSignalRoleForNMM = nmmConstructorConfig.nmm_params.external_signal_role;
+
+            const specificExtConfig = hlc_level_cfg.external_input_config;
+            if (specificExtConfig && typeof specificExtConfig === 'object' && !Array.isArray(specificExtConfig) &&
+                specificExtConfig.source_signal_name && specificExtConfig.dim > 0) {
+
+                expectedNmmExtSourceName = specificExtConfig.source_signal_name;
+                nmmExtSignalDimForNMM = specificExtConfig.dim;
+
+                if (specificExtConfig.role) { // Role from external_input_config overrides nmm_params for this signal
+                    nmmExtSignalRoleForNMM = specificExtConfig.role;
+                } else if (nmmExtSignalDimForNMM > 0 && nmmExtSignalRoleForNMM === 'none') {
+                    nmmExtSignalRoleForNMM = 'add_to_bu'; // Default if dim provided but no role
+                }
+            } else if (specificExtConfig && nmmConstructorConfig.nmm_params.verbose) {
+                hnmLog(`Warning for ${hlc_level_cfg.name}: external_input_config is present but invalid or incomplete. ${JSON.stringify(specificExtConfig)}`, "warn");
+            }
+
+            nmmConstructorConfig.nmm_params.external_signal_dim = nmmExtSignalDimForNMM;
+            nmmConstructorConfig.nmm_params.external_signal_role = nmmExtSignalRoleForNMM;
+            this.level_expected_external_details[i] = { name: expectedNmmExtSourceName, dim: nmmExtSignalDimForNMM };
+
+            this.levels.push(new NMM_TD_V5_TFJS(nmmConstructorConfig));
+        });
+        this.numLevels = this.levels.length;
+        hnmLog(`HS_V5_TFJS: Initialization complete. ${this.levels.length} levels created.`);
+    }
+
+    getInitialStates() {
+        if (this.isDisposed) throw new Error(`HNS is disposed.`);
+        return this.levels.map(level => level.getInitialState());
+    }
+
+    step(currentBotLevelStates, currentBotLastStepOutputs, sensoryInputs, externalInputsAllSources = {}, detachNextStatesMemory = true) {
+        if (this.isDisposed) throw new Error(`HNS is disposed.`);
+        const nextBotLevelStatesList = new Array(this.numLevels).fill(null);
+        const newlyRetrievedValuesForAllLevelsDict = {};
+        const stepAnomalies = {}; const stepWeightChanges = {};
+        const stepBuNorms = {}; const stepTdNorms = {}; const stepExternalNorms = {};
+        const currentStepIntermediateOutputs = {};
+
+        for (let i = 0; i < this.numLevels; i++) {
+            const lvlMgr = this.levels[i]; const cfg = this.levelConfigsOriginal[i];
+            const lvlName = cfg.name; const buSrcNames = cfg.bu_source_level_names || []; const tdSrcNames = cfg.td_source_level_names || [];
+            const currentLevelSpecificState = currentBotLevelStates[i];
+            const lvlBuIn = {}; const lvlTdIn = {};
+
+            if (buSrcNames.length === 0) { // This is a root sensory level
+                const rawSensoryDim = cfg.raw_sensory_input_dim; // The dim this level expects for its raw sensory input
+                const sensoryInputTensor = sensoryInputs[lvlName]; // Get the tensor for this specific level
+
+                if (sensoryInputTensor && !sensoryInputTensor.isDisposed &&
+                    sensoryInputTensor.shape && sensoryInputTensor.shape.length === 3 && // Expect [1,1,dim]
+                    sensoryInputTensor.shape[0] === 1 && sensoryInputTensor.shape[1] === 1 &&
+                    sensoryInputTensor.shape[2] === rawSensoryDim) {
+                    lvlBuIn[lvlName] = sensoryInputTensor; // Keyed by its own name for sensory input
+                } else {
+                    if(lvlMgr.nmmParams.verbose) hnmLog(`Warning: Sensory input for ${lvlName} is invalid or missing. Using zeros. Expected shape [1,1,${rawSensoryDim}], got ${sensoryInputTensor?.shape}`, "warn");
+                    lvlBuIn[lvlName] = tf.keep(tf.zeros([1, 1, rawSensoryDim]));
+                }
+            } else { // This level gets BU input from other levels' current step outputs
+                buSrcNames.forEach(srcName => {
+                    const buSourceOutput = currentStepIntermediateOutputs[srcName]; // Output from a previous level *in this same step*
+                    if (buSourceOutput && !buSourceOutput.isDisposed) { lvlBuIn[srcName] = buSourceOutput; }
+                    else {
+                        hnmLog(`Warning: Missing BU source output from '${srcName}' for level '${lvlName}' in current step. Using zeros.`, "warn");
+                        lvlBuIn[srcName] = tf.keep(tf.zeros([1, 1, this.dims[srcName]]));
+                    }
+                });
+            }
+
+            // TD inputs come from *last* step's outputs of higher levels
+            tdSrcNames.forEach(srcName => {
+                const tdSourceOutput = currentBotLastStepOutputs[srcName]?.retrievedVal; // From HNM's previous full pass
+                if (tdSourceOutput && !tdSourceOutput.isDisposed) { lvlTdIn[srcName] = tdSourceOutput; }
+                else { // If TD signal is missing, provide zeros
+                    lvlTdIn[srcName] = tf.keep(tf.zeros([1, 1, this.dims[srcName]]));
+                }
+            });
+
+            // External input for this specific NMM
+            let lvlExtInForNMMStep = null;
+            const expectedExternal = this.level_expected_external_details[i]; // {name, dim} this NMM expects
+            if (expectedExternal && expectedExternal.name && expectedExternal.dim > 0) {
+                const providedSignal = externalInputsAllSources[expectedExternal.name];
+                if (providedSignal && !providedSignal.isDisposed && providedSignal.shape &&
+                    providedSignal.shape.length === 3 && providedSignal.shape[0] === 1 &&
+                    providedSignal.shape[1] === 1 && providedSignal.shape[2] === expectedExternal.dim) {
+                    lvlExtInForNMMStep = providedSignal;
+                } else {
+                    if(lvlMgr.nmmParams.verbose) hnmLog(`Warning for ${lvlName}: External signal '${expectedExternal.name}' invalid or missing from externalInputsAllSources. Using zeros. Expected dim ${expectedExternal.dim}, got ${providedSignal?.shape}`, "warn");
+                    lvlExtInForNMMStep = tf.keep(tf.zeros([1,1,expectedExternal.dim]));
+                }
+            }
+
             const nmmOutputs = lvlMgr.forwardStep(lvlBuIn, lvlTdIn, currentLevelSpecificState, lvlExtInForNMMStep, detachNextStatesMemory);
-            nextBotLevelStatesList[i] = nmmOutputs.nextState; currentStepIntermediateOutputs[lvlName] = tf.keep(nmmOutputs.retrievedVal.clone()); newlyRetrievedValuesForAllLevelsDict[lvlName] = nmmOutputs.retrievedVal;
-            stepAnomalies[lvlName] = nmmOutputs.anomalyScore; stepWeightChanges[lvlName] = nmmOutputs.weightChange; stepBuNorms[lvlName] = nmmOutputs.buNorm; stepTdNorms[lvlName] = nmmOutputs.tdNorm; stepExternalNorms[lvlName] = nmmOutputs.extNorm;
+
+            nextBotLevelStatesList[i] = nmmOutputs.nextState;
+            currentStepIntermediateOutputs[lvlName] = tf.keep(nmmOutputs.retrievedVal.clone()); // This level's output for current step
+            newlyRetrievedValuesForAllLevelsDict[lvlName] = nmmOutputs.retrievedVal; // For the final HNS output dict
+
+            stepAnomalies[lvlName] = nmmOutputs.anomalyScore;
+            stepWeightChanges[lvlName] = nmmOutputs.weightChange;
+            stepBuNorms[lvlName] = nmmOutputs.buNorm;
+            stepTdNorms[lvlName] = nmmOutputs.tdNorm;
+            stepExternalNorms[lvlName] = nmmOutputs.extNorm;
+
             Object.entries(lvlBuIn).forEach(([key, t]) => { if (t !== sensoryInputs[lvlName] && t !== currentStepIntermediateOutputs[key] && t.rank === 3 && t.shape[0] === 1 && !t.isDisposed && t.dataSync().every(v => v ===0) ) t.dispose(); });
             Object.entries(lvlTdIn).forEach(([key, t]) => { if (t !== currentBotLastStepOutputs[key]?.retrievedVal && t.rank === 3 && t.shape[0] === 1 && !t.isDisposed && t.dataSync().every(v => v ===0) ) t.dispose(); });
             if (lvlExtInForNMMStep && lvlExtInForNMMStep !== externalInputsAllSources[expectedExternal?.name] && lvlExtInForNMMStep.rank === 3 && lvlExtInForNMMStep.shape[0] === 1 && !lvlExtInForNMMStep.isDisposed && lvlExtInForNMMStep.dataSync().every(v => v ===0) ) lvlExtInForNMMStep.dispose();
         }
+
         Object.values(currentStepIntermediateOutputs).forEach(t => { if (t && !t.isDisposed) t.dispose(); });
+
         return { newlyRetrievedValues: newlyRetrievedValuesForAllLevelsDict, nextBotStates: nextBotLevelStatesList, anomalies: stepAnomalies, weightChanges: stepWeightChanges, buNorms: stepBuNorms, tdNorms: stepTdNorms, extNorms: stepExternalNorms };
     }
-    dispose() { if (this.isDisposed) return; this.levels.forEach(l => {if (l && typeof l.dispose === 'function') l.dispose();}); this.levels = []; this.isDisposed = true; hnmLog("HNS Disposed."); }
+
+    dispose() {
+        if (this.isDisposed) return;
+        this.levels.forEach(l => {if (l && typeof l.dispose === 'function') l.dispose();});
+        this.levels = []; this.isDisposed = true; hnmLog("HNS Disposed.");
+    }
 }
 window.MemoryMLP_TFJS = MemoryMLP_TFJS; window.NMM_TD_V5_TFJS = NMM_TD_V5_TFJS; window.HierarchicalSystemV5_TFJS = HierarchicalSystemV5_TFJS;
 window.createNeuralMemState = createNeuralMemState; window.memStateDetach = memStateDetach; window.disposeMemStateWeights = disposeMemStateWeights; window.disposeHnsResultsTensors = disposeHnsResultsTensors; window.hnmLog = hnmLog;
@@ -282,7 +696,7 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
         const PLAYER_MAX_HEALTH = 100; const ENEMY_MAX_HEALTH_BASE = 50; const ENEMY_DAMAGE_BASE = 10; const BLADE_HIT_DAMAGE = 20;
         let gameOver = false;
 
-        const HNM_SENSORY_INPUT_DIM = 37; // Increased by 1 for autoBattleInfluence
+        const HNM_SENSORY_INPUT_DIM = 37;
         const HNM_BCI_COMMAND_DIM = 4;
         const VINE_RULE_ACTION_DIM_PER_SEGMENT = 3;
         const BLADE_RULE_ACTION_DIM = 6;
@@ -294,9 +708,9 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
         const userInput = { mouseX: 0, mouseY: 0, click: false, moveForward: 0, moveBackward: 0, moveLeft: 0, moveRight: 0, jump: false, bciCommandTarget: new THREE.Vector3(), bciCommandTargetScreen: new THREE.Vector2(), bciCommandTargetLastScreen: new THREE.Vector2(), bciCoherence: 0.0, bciAction: false, cameraYaw: Math.PI, cameraPitch: 0.25, isPointerLocked: false, isBCIModeActive: false, isBCITouchAiming: false, bciTouchStart: {x:0, y:0}, bciTouchCurrent: {x:0, y:0}, isDirectControllingVine: false, directControlActionActive: false };
         const params = {
             gravity: -15.0, playerSpeed: 8.0, playerJumpForce: 9.0,
-            vineSegmentLength: 1.0, vineSegmentRadius: 0.2, numVineSegments: 20,
+            vineSegmentLength: 0.5, vineSegmentRadius: 0.2, numVineSegments: 20,
             vineForceScale: 5.0, vineDamping: 0.1, vineArmorSpringK: 5.0, vineArmorDampingK: 0.1,
-            bladeForceScale: 5.0, bladeTorqueScale: 0.1, numBlades: 10, bladeOrbitRadiusBase: 3.0, bladeOrbitSpeed: 2.0,
+            bladeForceScale: 5.0, bladeTorqueScale: 0.1, numBlades: 10, bladeOrbitRadiusBase: 2.0, bladeOrbitSpeed: 2.0,
             bladeReEngageSpeedThreshold: 2.0, bladeReEngageBackupDist: 5.0,
             showRapierDebug: true, enableHNM: false,
             resetSimulation: () => initDemo(true),
@@ -356,7 +770,7 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
 
             const combatFolder = gui.addFolder('Combat Demo');
             combatFolder.add(params, 'numEnemies', 1, 100, 1).name('Number of Enemies').onChange(() => initDemo(true));
-            combatFolder.add(params, 'autoBattleInfluence', 0, 100, 1).name('Auto-Battle Intent %'); // New
+            combatFolder.add(params, 'autoBattleInfluence', 0, 100, 1).name('Auto-Battle Intent %');
 
             const hnmControlFolder = gui.addFolder('HNM Action & Stats');
             hnmControlFolder.add(params, 'enableHNM').name('Enable HNMs');
@@ -442,7 +856,9 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             } updateHealthUIDisplay();
         }
         function updateEnemies(deltaTime) {
-            if (gameOver) {
+            // If game over because all enemies are defeated, then stop them.
+            // If game over because player is defeated, let them continue their last actions.
+            if (gameOver && enemies.filter(e => e.health > 0).length === 0) {
                 enemies.forEach(enemy => {
                     if (enemy.rigidBody) {
                         enemy.rigidBody.setLinvel({x:0, y: enemy.isFlying ? 0 : enemy.rigidBody.linvel().y, z:0}, true);
@@ -450,18 +866,58 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
                 });
                 return;
             }
+
             const time = performance.now() * 0.001;
             enemies.forEach(enemy => { if (enemy.health <= 0 || !enemy.rigidBody || !player || !player.rigidBody) return; const enemyPos = enemy.rigidBody.translation(); const playerPosVec = player.rigidBody.translation();
                 if (enemy.isFlying) { const targetFlyHeight = playerPosVec.y + 2.0 + Math.sin(time * 0.3 + enemy.id.hashCode() * 0.1) * 1.5; const directionToPlayer3D = new THREE.Vector3(playerPosVec.x - enemyPos.x, targetFlyHeight - enemyPos.y, playerPosVec.z - enemyPos.z); if (directionToPlayer3D.lengthSq() > 0.1) { directionToPlayer3D.normalize(); const enemySpeed = 2.0 + enemy.level * 0.25; enemy.rigidBody.setLinvel({ x: directionToPlayer3D.x * enemySpeed, y: directionToPlayer3D.y * enemySpeed, z: directionToPlayer3D.z * enemySpeed }, true); }
                 } else { const directionToPlayer = new THREE.Vector3(playerPosVec.x - enemyPos.x, 0, playerPosVec.z - enemyPos.z); if (directionToPlayer.lengthSq() > 0.1) { directionToPlayer.normalize(); const enemySpeed = 3.0 + enemy.level * 0.5; enemy.rigidBody.setLinvel({ x: directionToPlayer.x * enemySpeed, y: enemy.rigidBody.linvel().y, z: directionToPlayer.z * enemySpeed }, true); } }
                 if (enemy.attackCooldown > 0) { enemy.attackCooldown -= deltaTime; } });
         }
-        function handlePlayerDamage(amount, source = "unknown") { if (gameOver) return; player.health -= amount; updateInfoDisplay(`Player took ${amount} damage from ${source}! Health: ${player.health}`); updateHealthUIDisplay(); if (player.health <= 0) { player.health = 0; gameOver = true; updateInfoDisplay("Player Defeated! Training session will restart."); setTimeout(() => initDemo(true), 3000); } }
+        function handlePlayerDamage(amount, source = "unknown") {
+            if (gameOver && player.health <= 0) return; // Prevent further damage if already game over by player defeat
+            player.health -= amount;
+            updateInfoDisplay(`Player took ${amount} damage from ${source}! Health: ${player.health}`);
+            updateHealthUIDisplay();
+            if (player.health <= 0 && !gameOver) { // Check !gameOver to ensure this block runs only once for player defeat
+                player.health = 0;
+                gameOver = true;
+                updateInfoDisplay("Player Defeated! Training session will restart.");
+
+                // Explicitly stop vine segments
+                if (vine && vine.segments) {
+                    vine.segments.forEach(seg => {
+                        if (seg.rigidBody) {
+                            seg.rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+                            seg.rigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
+                            seg.rigidBody.resetForces(true);
+                            seg.rigidBody.resetTorques(true);
+                        }
+                    });
+                }
+                // Also stop blades
+                blades.forEach(blade => {
+                    if (!blade.isStored && blade.rigidBody) {
+                        blade.rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+                        blade.rigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
+                        blade.rigidBody.resetForces(true);
+                        blade.rigidBody.resetTorques(true);
+                    }
+                });
+                setTimeout(() => initDemo(true), 3000);
+            }
+        }
         function handleEnemyDamage(enemyId, amount, source="unknown") {
-            if (gameOver) return; const enemy = enemies.find(e => e.id === enemyId);
+            if (gameOver && enemies.filter(e => e.health > 0).length === 0) return; // Prevent further enemy damage if game over by all enemies defeated
+            const enemy = enemies.find(e => e.id === enemyId);
             if (enemy && enemy.health > 0) { enemy.health -= amount; updateInfoDisplay(`Enemy ${enemyId} took ${amount} damage from ${source}! Health: ${enemy.health}`); updateHealthUIDisplay();
                 if (enemy.health <= 0) { enemy.health = 0; updateInfoDisplay(`Enemy ${enemyId} defeated!`); if (enemy.rigidBody) world.removeRigidBody(enemy.rigidBody); if (enemy.mesh) scene.remove(enemy.mesh); enemies = enemies.filter(e => e.id !== enemyId);
-                    if (enemies.length === 0) { gameOver = true; updateInfoDisplay("All enemies defeated! Training session complete. Restarting..."); setTimeout(() => initDemo(true), 3000); } } }
+                    if (enemies.filter(e => e.health > 0).length === 0 && !gameOver) { // Check !gameOver to ensure this block runs only once for all enemies defeated
+                        gameOver = true;
+                        updateInfoDisplay("All enemies defeated! Training session complete. Restarting...");
+                        setTimeout(() => initDemo(true), 3000);
+                    }
+                }
+            }
         }
         function updateHealthUIDisplay() {
             const playerHealthBarInner = document.querySelector('#player-health-bar .health-bar-inner'); if (playerHealthBarInner) playerHealthBarInner.style.width = `${(player.health / player.maxHealth) * 100}%`;
@@ -492,14 +948,14 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
                 addSafeEventListener(window, 'mouseup', (event) => { if (event.button === 0 && userInput.isBCIModeActive && event.ctrlKey) { event.preventDefault(); userInput.bciAction = false; userInput.directControlActionActive = false;} });
                 addSafeEventListener(window, 'keydown', (event) => { if (event.repeat || gameOver) return; if (event.key.toLowerCase() === 'shift') userInput.isBCIModeActive = true; if (event.key.toLowerCase() === 'control' && userInput.isBCIModeActive) { userInput.bciAction = true; if (userInput.isDirectControllingVine) userInput.directControlActionActive = true;} if (event.key.toLowerCase() === 'v' && !event.ctrlKey && !event.shiftKey) { userInput.isDirectControllingVine = !userInput.isDirectControllingVine; updateInfoDisplay(); } if (event.key.toLowerCase() === '1' && !event.ctrlKey && !event.shiftKey) deployBlades(1); if (event.key.toLowerCase() === 'r' && !event.ctrlKey && !event.shiftKey) recallAllBladesFunction();
                     switch(event.key.toLowerCase()) { case 'w': userInput.moveForward = 1; break; case 's': userInput.moveBackward = 1; break; case 'a': userInput.moveLeft = 1; break; case 'd': userInput.moveRight = 1; break; case ' ': userInput.jump = true; event.preventDefault(); break; } });
-                addSafeEventListener(window, 'keyup', (event) => { if (gameOver) return; if (event.key.toLowerCase() === 'shift') { userInput.isBCIModeActive = false; if (!event.ctrlKey) {userInput.bciAction = false; userInput.directControlActionActive = false;}} if (event.key.toLowerCase() === 'control') { userInput.bciAction = false; userInput.directControlActionActive = false; if (!event.shiftKey) userInput.isBCIModeActive = false; }
+                addSafeEventListener(window, 'keyup', (event) => { if (gameOver && player.health <= 0) return; if (event.key.toLowerCase() === 'shift') { userInput.isBCIModeActive = false; if (!event.ctrlKey) {userInput.bciAction = false; userInput.directControlActionActive = false;}} if (event.key.toLowerCase() === 'control') { userInput.bciAction = false; userInput.directControlActionActive = false; if (!event.shiftKey) userInput.isBCIModeActive = false; }
                     switch(event.key.toLowerCase()) { case 'w': userInput.moveForward = 0; break; case 's': userInput.moveBackward = 0; break; case 'a': userInput.moveLeft = 0; break; case 'd': userInput.moveRight = 0; break; } });
             }
         }
         function updatePlayerPhysicsIntent() {
             if (!player || !player.rigidBody) return;
-            if (gameOver) {
-                player.rigidBody.setLinvel({x:0, y:player.rigidBody.linvel().y, z:0}, true); // Stop horizontal movement
+            if (gameOver && player.health <=0) { // Only freeze player if they are defeated
+                player.rigidBody.setLinvel({x:0, y:player.rigidBody.linvel().y, z:0}, true);
                 return;
             }
 
@@ -530,7 +986,7 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             if (enemies.length > 0 && enemies[0].rigidBody && enemies[0].health > 0) { const enemy0Pos = enemies[0].rigidBody.translation(); const enemyRelPos = new THREE.Vector3(enemy0Pos.x - pos.x, enemy0Pos.y - pos.y, enemy0Pos.z - pos.z); nearestEnemyDist = enemyRelPos.length(); if(nearestEnemyDist > 0.01) enemyRelPos.normalize(); nearestEnemyRelX = enemyRelPos.x; nearestEnemyRelY = enemyRelPos.y; nearestEnemyRelZ = enemyRelPos.z; }
             data.push(nearestEnemyDist / 20.0); data.push(nearestEnemyRelX); data.push(nearestEnemyRelY); data.push(nearestEnemyRelZ);
             data.push(worldPosToPlayer.x / 10.0, worldPosToPlayer.y / 10.0, worldPosToPlayer.z / 10.0);
-            data.push(params.autoBattleInfluence / 100.0); // New sensory input
+            data.push(params.autoBattleInfluence / 100.0);
             while(data.length < HNM_SENSORY_INPUT_DIM) data.push(Math.random()*0.01 - 0.005);
             return tf.tensor1d(data.slice(0, HNM_SENSORY_INPUT_DIM)).expandDims(0).expandDims(0);
         }
@@ -547,54 +1003,151 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             } return tf.tensor1d(ruleAction).expandDims(0).expandDims(0);
         }
         function generateBladeRuleActionVector(bladeInstance, playerInstance, currentBciTargetWorld, currentBciCoherence, isBciActionActive, deltaTime) {
-            const ruleAction = new Array(BLADE_RULE_ACTION_DIM).fill(0.0); if (!bladeInstance || bladeInstance.isStored || !bladeInstance.rigidBody || !playerInstance || !playerInstance.rigidBody) { return tf.tensor1d(ruleAction).expandDims(0).expandDims(0); }
-            const bladePosVec = bladeInstance.rigidBody.translation(); const bladePos = new THREE.Vector3(bladePosVec.x, bladePosVec.y, bladePosVec.z); const playerPosVec = playerInstance.rigidBody.translation(); const playerPos = new THREE.Vector3(playerPosVec.x, playerPosVec.y, playerPosVec.z); const bladeVelVec = bladeInstance.rigidBody.linvel(); const bladeSpeed = Math.sqrt(bladeVelVec.x ** 2 + bladeVelVec.y ** 2 + bladeVelVec.z ** 2);
-            const isAttackIntent = currentBciCoherence > params.bciCoherenceMinActionThreshold && isBciActionActive; let forceMagnitudeFactor = 0.6; let torqueMagnitudeFactor = 0.4; let effectiveTarget = currentBciTargetWorld.clone();
-            if (!bladeInstance.state) bladeInstance.state = { timeSinceLastBackup: 0, stuckTimer: 0, isAggressivePursuit: false, aggressivePursuitTimer: 0 }; bladeInstance.state.timeSinceLastBackup += deltaTime;
-            if (params.autoBattleInfluence > 50 && isAttackIntent && enemies.length > 0) { let targetEnemyForLead = null; let minDistToBCITargetSq = Infinity;
-                enemies.forEach(e => { if (e.rigidBody && e.health > 0) { const enemyP = e.rigidBody.translation(); const distSq = currentBciTargetWorld.distanceToSquared(new THREE.Vector3(enemyP.x, enemyP.y, enemyP.z)); if (distSq < minDistToBCITargetSq) { minDistToBCITargetSq = distSq; targetEnemyForLead = e; } } });
-                if (targetEnemyForLead && targetEnemyForLead.rigidBody && minDistToBCITargetSq < (params.bciTargetDistance * params.bciTargetDistance) ) { const enemyCurrentPos = targetEnemyForLead.rigidBody.translation(); const enemyVel = targetEnemyForLead.rigidBody.linvel(); const leadTime = 0.18; effectiveTarget.set( enemyCurrentPos.x + enemyVel.x * leadTime, enemyCurrentPos.y + enemyVel.y * leadTime, enemyCurrentPos.z + enemyVel.z * leadTime ); if (targetEnemyForLead.isFlying) { effectiveTarget.y = Math.max(0.5, Math.min(enemyCurrentPos.y, playerPos.y + 3.0)); } else { effectiveTarget.y = enemyCurrentPos.y; } }
+            const ruleAction = new Array(BLADE_RULE_ACTION_DIM).fill(0.0);
+            if (!bladeInstance || bladeInstance.isStored || !bladeInstance.rigidBody || !playerInstance || !playerInstance.rigidBody) {
+                return tf.tensor1d(ruleAction).expandDims(0).expandDims(0);
             }
-            if (bladeInstance.state.isAggressivePursuit) { bladeInstance.state.aggressivePursuitTimer -= deltaTime; if (bladeInstance.state.aggressivePursuitTimer <= 0) { bladeInstance.state.isAggressivePursuit = false; } forceMagnitudeFactor = 1.0; torqueMagnitudeFactor = 0.8;
-            } else if (isAttackIntent) { // This is the block where the error occurred
-                const distToEffectiveTarget = bladePos.distanceTo(effectiveTarget); // <<< Calculate distToEffectiveTarget HERE
+
+            const bladePosVec = bladeInstance.rigidBody.translation();
+            const bladePos = new THREE.Vector3(bladePosVec.x, bladePosVec.y, bladePosVec.z);
+            const playerPosVec = playerInstance.rigidBody.translation();
+            const playerPos = new THREE.Vector3(playerPosVec.x, playerPosVec.y, playerPosVec.z);
+            const bladeVelVec = bladeInstance.rigidBody.linvel();
+            const bladeSpeed = Math.sqrt(bladeVelVec.x ** 2 + bladeVelVec.y ** 2 + bladeVelVec.z ** 2);
+
+            const isAttackIntent = currentBciCoherence > params.bciCoherenceMinActionThreshold && isBciActionActive;
+            let forceMagnitudeFactor = 0.6;
+            let torqueMagnitudeFactor = 0.4;
+            let effectiveTarget = currentBciTargetWorld.clone();
+
+            if (!bladeInstance.state) {
+                bladeInstance.state = { timeSinceLastBackup: 0, stuckTimer: 0, isAggressivePursuit: false, aggressivePursuitTimer: 0, lockedEnemyTargetId: null };
+            }
+            bladeInstance.state.timeSinceLastBackup += deltaTime;
+
+            const isStrongAIControl = params.autoBattleInfluence > 80;
+
+            if (bladeInstance.state.isAggressivePursuit) {
+                bladeInstance.state.aggressivePursuitTimer -= deltaTime;
+                if (bladeInstance.state.aggressivePursuitTimer <= 0) {
+                    bladeInstance.state.isAggressivePursuit = false;
+                    bladeInstance.state.lockedEnemyTargetId = null; // Clear lock when pursuit ends
+                }
+
+                if (bladeInstance.state.lockedEnemyTargetId) {
+                    const lockedEnemy = enemies.find(e => e.id === bladeInstance.state.lockedEnemyTargetId && e.health > 0 && e.rigidBody);
+                    if (lockedEnemy) {
+                        const enemyCurrentPos = lockedEnemy.rigidBody.translation();
+                        const enemyVel = lockedEnemy.rigidBody.linvel();
+                        const leadTime = 0.1; // Shorter lead for aggressive lock
+                        effectiveTarget.set(enemyCurrentPos.x + enemyVel.x * leadTime, enemyCurrentPos.y + enemyVel.y * leadTime, enemyCurrentPos.z + enemyVel.z * leadTime );
+                        if (lockedEnemy.isFlying) effectiveTarget.y = Math.max(0.5, Math.min(enemyCurrentPos.y, playerPos.y + 3.0)); else effectiveTarget.y = enemyCurrentPos.y;
+                    } else { // Target lost or defeated
+                        bladeInstance.state.isAggressivePursuit = false;
+                        bladeInstance.state.lockedEnemyTargetId = null;
+                        // Fallback to current BCI target if locked target is gone
+                        effectiveTarget.copy(currentBciTargetWorld);
+                    }
+                }
+                forceMagnitudeFactor = 1.0;
+                torqueMagnitudeFactor = 0.8;
+
+            } else if (isAttackIntent) {
+                 if (params.autoBattleInfluence > 50 && enemies.length > 0) {
+                    let targetEnemyForLead = null; let minDistToBCITargetSq = Infinity;
+                    enemies.forEach(e => { if (e.rigidBody && e.health > 0) { const enemyP = e.rigidBody.translation(); const distSq = currentBciTargetWorld.distanceToSquared(new THREE.Vector3(enemyP.x, enemyP.y, enemyP.z)); if (distSq < minDistToBCITargetSq) { minDistToBCITargetSq = distSq; targetEnemyForLead = e; } } });
+                    if (targetEnemyForLead && targetEnemyForLead.rigidBody && minDistToBCITargetSq < (params.bciTargetDistance * params.bciTargetDistance) ) { const enemyCurrentPos = targetEnemyForLead.rigidBody.translation(); const enemyVel = targetEnemyForLead.rigidBody.linvel(); const leadTime = 0.18; effectiveTarget.set( enemyCurrentPos.x + enemyVel.x * leadTime, enemyCurrentPos.y + enemyVel.y * leadTime, enemyCurrentPos.z + enemyVel.z * leadTime ); if (targetEnemyForLead.isFlying) { effectiveTarget.y = Math.max(0.5, Math.min(enemyCurrentPos.y, playerPos.y + 3.0)); } else { effectiveTarget.y = enemyCurrentPos.y; } }
+                }
+
+                const distToEffectiveTarget = bladePos.distanceTo(effectiveTarget);
                 let shouldBackup = false;
-                const isStrongAIControl = params.autoBattleInfluence > 80;
-                
-                if (distToEffectiveTarget < params.bladeReEngageBackupDist * 0.5 && bladeSpeed < params.bladeReEngageSpeedThreshold && bladeInstance.state.timeSinceLastBackup > (isStrongAIControl ? 2.0 : 1.0) ) { // Now distToEffectiveTarget is defined
+
+                if (distToEffectiveTarget < params.bladeReEngageBackupDist * 0.5 &&
+                    bladeSpeed < params.bladeReEngageSpeedThreshold &&
+                    bladeInstance.state.timeSinceLastBackup > (isStrongAIControl ? 2.0 : 1.0)) {
                     shouldBackup = true;
                 }
+
                 if (distToEffectiveTarget < params.bladeReEngageBackupDist * 0.25 && bladeSpeed < params.bladeReEngageSpeedThreshold * 0.5) {
                     bladeInstance.state.stuckTimer = (bladeInstance.state.stuckTimer || 0) + deltaTime;
-                    if (bladeInstance.state.stuckTimer > (isStrongAIControl ? 1.0 : 0.5)) {
-                         shouldBackup = true;
-                    }
                 } else {
                     bladeInstance.state.stuckTimer = 0;
                 }
 
                 if (isStrongAIControl && shouldBackup) {
-                     if (distToEffectiveTarget > params.bladeReEngageBackupDist * 0.1) {
-                        // AI will still backup if truly stuck, but not as readily
-                     } else {
-                        shouldBackup = false; // AI is very close, don't backup, keep trying
-                     }
+                     if (distToEffectiveTarget > params.bladeReEngageBackupDist * 0.1) { /* AI will still backup if truly stuck */ }
+                     else { shouldBackup = false; /* AI is very close, don't backup */ }
                 }
 
                 if (bladeInstance.state.stuckTimer > (isStrongAIControl ? 2.5 : 1.5) && !bladeInstance.state.isAggressivePursuit) {
                     bladeInstance.state.isAggressivePursuit = true;
                     bladeInstance.state.aggressivePursuitTimer = 2.0;
                     bladeInstance.state.stuckTimer = 0;
+
+                    // Identify and lock target when aggressive pursuit starts
+                    bladeInstance.state.lockedEnemyTargetId = null; // Clear previous
+                    if (params.autoBattleInfluence > 50) {
+                        let tempTargetEnemy = null; let tempMinDistSq = Infinity;
+                        enemies.forEach(e => { if (e.rigidBody && e.health > 0) { const enemyP = e.rigidBody.translation(); const distSq = effectiveTarget.distanceToSquared(new THREE.Vector3(enemyP.x, enemyP.y, enemyP.z)); if (distSq < tempMinDistSq) { tempMinDistSq = distSq; tempTargetEnemy = e; } } });
+                        if (tempTargetEnemy) bladeInstance.state.lockedEnemyTargetId = tempTargetEnemy.id;
+                    } else {
+                        let enemyClosestToEffectiveTarget = null; let minDistSq = 0.75*0.75; // Check within a small radius of the effective target point
+                        enemies.forEach(e => { if (e.rigidBody && e.health > 0) { const enemyP = e.rigidBody.translation(); const distSq = effectiveTarget.distanceToSquared(new THREE.Vector3(enemyP.x, enemyP.y, enemyP.z)); if (distSq < minDistSq) { minDistSq = distSq; enemyClosestToEffectiveTarget = e; } } });
+                        if (enemyClosestToEffectiveTarget) bladeInstance.state.lockedEnemyTargetId = enemyClosestToEffectiveTarget.id;
+                    }
                 }
 
-                if (shouldBackup && !bladeInstance.state.isAggressivePursuit) { bladeInstance.state.timeSinceLastBackup = 0; bladeInstance.state.stuckTimer = 0; const playerToTargetDir = new THREE.Vector3().subVectors(effectiveTarget, playerPos).normalize(); const perpendicularOffset = new THREE.Vector3(-playerToTargetDir.z, 0, playerToTargetDir.x).multiplyScalar(params.bladeReEngageBackupDist * 0.3); const idealBackupPos = playerPos.clone().addScaledVector(playerToTargetDir, -params.bladeReEngageBackupDist * 0.7).add(perpendicularOffset); const backupDir = new THREE.Vector3().subVectors(idealBackupPos, bladePos).normalize(); const backupTarget = bladePos.clone().addScaledVector(backupDir, params.bladeReEngageBackupDist); effectiveTarget.copy(backupTarget); forceMagnitudeFactor = 0.7; torqueMagnitudeFactor = 0.2;
-                } else if (!bladeInstance.state.isAggressivePursuit) { forceMagnitudeFactor = 0.85; torqueMagnitudeFactor = 0.6; bladeInstance.state.stuckTimer = 0; }
-            } else { bladeInstance.state.stuckTimer = 0; bladeInstance.state.isAggressivePursuit = false; const bladeIndex = blades.findIndex(b => b.id === bladeInstance.id); const activeBladesCount = Math.max(1, blades.filter(b => !b.isStored).length); const angleOffset = (bladeIndex * Math.PI * 2 / activeBladesCount) + performance.now() * 0.001 * params.bladeOrbitSpeed; const orbitRadius = params.bladeOrbitRadiusBase + (bladeIndex % 3) * 0.7; const orbitHeightVariation = (bladeIndex % 2 === 0) ? 0.3 : -0.2; effectiveTarget.set( playerPos.x + Math.cos(angleOffset) * orbitRadius, playerPos.y + 0.8 + orbitHeightVariation, playerPos.z + Math.sin(angleOffset) * orbitRadius ); forceMagnitudeFactor = 0.5; torqueMagnitudeFactor = 0.3; }
-            let dirToFinalTarget = new THREE.Vector3().subVectors(effectiveTarget, bladePos); if (dirToFinalTarget.lengthSq() > 0.01) dirToFinalTarget.normalize(); else dirToFinalTarget.set(0, 0, 0); ruleAction[0] = dirToFinalTarget.x; ruleAction[1] = dirToFinalTarget.y; ruleAction[2] = dirToFinalTarget.z;
-            const bladeRapierQuat = bladeInstance.rigidBody.rotation(); const bladeThreeQuat = new THREE.Quaternion(bladeRapierQuat.x, bladeRapierQuat.y, bladeRapierQuat.z, bladeRapierQuat.w); const currentForward = new THREE.Vector3(0, 0, 1).applyQuaternion(bladeThreeQuat);
-            let lookAtDir; if (isAttackIntent || bladeInstance.state.isAggressivePursuit) { lookAtDir = dirToFinalTarget; } else { lookAtDir = new THREE.Vector3().subVectors(playerPos, bladePos); if (lookAtDir.lengthSq() > 0.01) lookAtDir.normalize(); else lookAtDir.set(0,0,0); }
-            const targetRotAxis = new THREE.Vector3().crossVectors(currentForward, lookAtDir); const angle = currentForward.angleTo(lookAtDir);
-            if (angle > 0.05 && targetRotAxis.lengthSq() > 0.001) { targetRotAxis.normalize(); const desiredAngVel = targetRotAxis.multiplyScalar(angle * (isAttackIntent || bladeInstance.state.isAggressivePursuit ? 2.5 : 1.5)); const currentAngVel = bladeInstance.rigidBody.angvel(); const torqueError = desiredAngVel.sub(new THREE.Vector3(currentAngVel.x, currentAngVel.y, currentAngVel.z)); ruleAction[3] = THREE.MathUtils.clamp(torqueError.x, -1, 1); ruleAction[4] = THREE.MathUtils.clamp(torqueError.y, -1, 1); ruleAction[5] = THREE.MathUtils.clamp(torqueError.z, -1, 1); }
+                if (shouldBackup && !bladeInstance.state.isAggressivePursuit) {
+                    bladeInstance.state.timeSinceLastBackup = 0;
+                    bladeInstance.state.stuckTimer = 0;
+                    const playerToTargetDir = new THREE.Vector3().subVectors(effectiveTarget, playerPos).normalize();
+                    const perpendicularOffset = new THREE.Vector3(-playerToTargetDir.z, 0, playerToTargetDir.x).multiplyScalar(params.bladeReEngageBackupDist * 0.3);
+                    const idealBackupPos = playerPos.clone().addScaledVector(playerToTargetDir, -params.bladeReEngageBackupDist * 0.7).add(perpendicularOffset);
+                    const backupDir = new THREE.Vector3().subVectors(idealBackupPos, bladePos).normalize();
+                    const backupTarget = bladePos.clone().addScaledVector(backupDir, params.bladeReEngageBackupDist);
+                    effectiveTarget.copy(backupTarget);
+                    forceMagnitudeFactor = 0.7; torqueMagnitudeFactor = 0.2;
+                } else if (!bladeInstance.state.isAggressivePursuit) {
+                    forceMagnitudeFactor = 0.85; torqueMagnitudeFactor = 0.6;
+                    bladeInstance.state.stuckTimer = 0; // Ensure stuck timer resets if not stuck
+                }
+            } else { // Not an attack intent, orbiting or idle
+                bladeInstance.state.stuckTimer = 0;
+                bladeInstance.state.isAggressivePursuit = false;
+                bladeInstance.state.lockedEnemyTargetId = null; // Clear lock
+                const bladeIndex = blades.findIndex(b => b.id === bladeInstance.id);
+                const activeBladesCount = Math.max(1, blades.filter(b => !b.isStored).length);
+                const angleOffset = (bladeIndex * Math.PI * 2 / activeBladesCount) + performance.now() * 0.001 * params.bladeOrbitSpeed;
+                const orbitRadius = params.bladeOrbitRadiusBase + (bladeIndex % 3) * 0.7;
+                const orbitHeightVariation = (bladeIndex % 2 === 0) ? 0.3 : -0.2;
+                effectiveTarget.set( playerPos.x + Math.cos(angleOffset) * orbitRadius, playerPos.y + 0.8 + orbitHeightVariation, playerPos.z + Math.sin(angleOffset) * orbitRadius );
+                forceMagnitudeFactor = 0.5; torqueMagnitudeFactor = 0.3;
+            }
+
+            let dirToFinalTarget = new THREE.Vector3().subVectors(effectiveTarget, bladePos);
+            if (dirToFinalTarget.lengthSq() > 0.01) dirToFinalTarget.normalize(); else dirToFinalTarget.set(0, 0, 0);
+            ruleAction[0] = dirToFinalTarget.x; ruleAction[1] = dirToFinalTarget.y; ruleAction[2] = dirToFinalTarget.z;
+
+            const bladeRapierQuat = bladeInstance.rigidBody.rotation();
+            const bladeThreeQuat = new THREE.Quaternion(bladeRapierQuat.x, bladeRapierQuat.y, bladeRapierQuat.z, bladeRapierQuat.w);
+            const currentForward = new THREE.Vector3(0, 0, 1).applyQuaternion(bladeThreeQuat);
+
+            let lookAtDir;
+            if (isAttackIntent || bladeInstance.state.isAggressivePursuit) { lookAtDir = dirToFinalTarget; }
+            else { lookAtDir = new THREE.Vector3().subVectors(playerPos, bladePos); if (lookAtDir.lengthSq() > 0.01) lookAtDir.normalize(); else lookAtDir.set(0,0,0); }
+
+            const targetRotAxis = new THREE.Vector3().crossVectors(currentForward, lookAtDir);
+            const angle = currentForward.angleTo(lookAtDir);
+
+            if (angle > 0.05 && targetRotAxis.lengthSq() > 0.001) {
+                targetRotAxis.normalize();
+                const desiredAngVel = targetRotAxis.multiplyScalar(angle * (isAttackIntent || bladeInstance.state.isAggressivePursuit ? 2.5 : 1.5));
+                const currentAngVel = bladeInstance.rigidBody.angvel();
+                const torqueError = desiredAngVel.sub(new THREE.Vector3(currentAngVel.x, currentAngVel.y, currentAngVel.z));
+                ruleAction[3] = THREE.MathUtils.clamp(torqueError.x, -1, 1);
+                ruleAction[4] = THREE.MathUtils.clamp(torqueError.y, -1, 1);
+                ruleAction[5] = THREE.MathUtils.clamp(torqueError.z, -1, 1);
+            }
             for (let i = 0; i < 3; ++i) ruleAction[i] *= forceMagnitudeFactor; for (let i = 3; i < 6; ++i) ruleAction[i] *= torqueMagnitudeFactor;
             return tf.tensor1d(ruleAction).expandDims(0).expandDims(0);
         }
@@ -618,11 +1171,12 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
         }
         function updateBCIAndHNMs(deltaTime) {
             if (!player || !player.rigidBody) return;
-             if (gameOver) { // If game is over, don't update BCI/HNM logic that might cause movement
-                userInput.bciCoherence = Math.max(0.0, userInput.bciCoherence - params.bciCoherenceDecayRate * deltaTime * 60); // Let coherence decay
-                userInput.bciAction = false; // Ensure action is off
+             if (gameOver && player.health <= 0) { // Only decay BCI if player is defeated
+                userInput.bciCoherence = Math.max(0.0, userInput.bciCoherence - params.bciCoherenceDecayRate * deltaTime * 60);
+                userInput.bciAction = false;
                 if (bciTargetWorldIndicatorMesh) bciTargetWorldIndicatorMesh.style.display = 'none';
-                return;
+                // Don't return early if game over is due to all enemies defeated, HNM might still run for a bit
+                if (player.health <= 0) return;
             }
             const playerPosVec = player.rigidBody.translation(); const playerPos = new THREE.Vector3(playerPosVec.x, playerPosVec.y, playerPosVec.z);
             let playerRawBciTargetScreen = new THREE.Vector2(0,0); let playerIsActivelyBciAiming = false; let playerWantsBciActionThisFrame = false;
@@ -634,9 +1188,9 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             const finalPlayerWantsBciAction = playerIsActivelyBciAiming && playerWantsBciActionThisFrame && (finalPlayerCoherence >= params.bciCoherenceMinActionThreshold);
             let autoBattleBciTargetWorld = new THREE.Vector3().copy(finalPlayerBciTargetWorld); let autoBattleCoherence = 0.0; let autoBattleWantsBciAction = false;
             if (params.autoBattleInfluence > 0) { player.autoBattleTargetVelocity.set(0,0,0); player.autoBattleFaceEnemy = false;
-                if (enemies.length > 0) { let closestEnemy = null; let minDistanceSq = Infinity; enemies.forEach(enemy => { if (enemy.rigidBody && enemy.health > 0) { const enemyP = enemy.rigidBody.translation(); const distSq = playerPos.distanceToSquared(new THREE.Vector3(enemyP.x, enemyP.y, enemyP.z)); if (distSq < minDistanceSq) { minDistanceSq = distSq; closestEnemy = enemy; } } });
+                if (enemies.filter(e => e.health > 0).length > 0) { let closestEnemy = null; let minDistanceSq = Infinity; enemies.forEach(enemy => { if (enemy.rigidBody && enemy.health > 0) { const enemyP = enemy.rigidBody.translation(); const distSq = playerPos.distanceToSquared(new THREE.Vector3(enemyP.x, enemyP.y, enemyP.z)); if (distSq < minDistanceSq) { minDistanceSq = distSq; closestEnemy = enemy; } } });
                     if (closestEnemy && closestEnemy.rigidBody) { const enemyPosVec = closestEnemy.rigidBody.translation(); const enemyPosTHREE = new THREE.Vector3(enemyPosVec.x, enemyPosVec.y, enemyPosVec.z); autoBattleBciTargetWorld.copy(enemyPosTHREE); player.autoBattleFaceEnemy = true; player.autoBattleTargetEnemyPos.copy(enemyPosTHREE); const distanceToEnemy = Math.sqrt(minDistanceSq); const desiredDistance = params.bladeOrbitRadiusBase * 1.8; const directionToEnemyWorld = new THREE.Vector3().subVectors(enemyPosTHREE, playerPos); if (!closestEnemy.isFlying) directionToEnemyWorld.y = 0; if(directionToEnemyWorld.lengthSq() > 0.01) directionToEnemyWorld.normalize(); if (distanceToEnemy > desiredDistance + 0.5) player.autoBattleTargetVelocity.copy(directionToEnemyWorld).multiplyScalar(params.playerSpeed); else if (distanceToEnemy < desiredDistance - 0.5) player.autoBattleTargetVelocity.copy(directionToEnemyWorld).multiplyScalar(-params.playerSpeed); if (!closestEnemy.isFlying && Math.random() < 0.015 && player.isOnGround) userInput.jump = true; autoBattleCoherence = 0.85;
-                         autoBattleWantsBciAction = true; // AI wants to act if it has a target
+                         autoBattleWantsBciAction = true;
                          if (distanceToEnemy < params.bciTargetDistance * 0.95) { const activeBladesCount = blades.filter(b => !b.isStored).length; if (activeBladesCount < params.numBlades && Math.random() < 0.08 * (params.autoBattleInfluence/100)) deployBlades(1); }
                     } else { autoBattleCoherence = 0.1; } } else { autoBattleCoherence = 0.05; } }
             const abInfluenceRatio = params.autoBattleInfluence / 100.0; bciTargetWorld.lerpVectors(finalPlayerBciTargetWorld, autoBattleBciTargetWorld, abInfluenceRatio); userInput.bciCoherence = THREE.MathUtils.lerp(finalPlayerCoherence, autoBattleCoherence, abInfluenceRatio);
@@ -664,7 +1218,7 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             updateInfoDisplay();
         }
         function applyHNMOutputsAndDirectControlToEntities() {
-            if (gameOver) return;
+            if (gameOver && player.health <=0) return; // Stop applying if player defeated
             let vineActionsToApply = ruleBasedActions.vine; player.vineControlledBy = "Rules (Current Intent)";
             if (userInput.isDirectControllingVine && userInput.directControlActionActive) { vineActionsToApply = ruleBasedActions.vine; player.vineControlledBy = "DirectPlayer (BCI)";
             } else if (params.enableHNM && hnmPredictedActions.vine) { if (Math.random() * 100 < params.hnmTakesControlChance) { vineActionsToApply = hnmPredictedActions.vine; player.vineControlledBy = `HNM (${params.hnmTakesControlChance}%)`; } else { player.vineControlledBy = `Rules (HNM Roll Fail: ${100 - params.hnmTakesControlChance}%)`; } }
@@ -674,7 +1228,7 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
                 if (bladeActionsToApply && bladeActionsToApply.length === BLADE_RULE_ACTION_DIM) { blade.rigidBody.resetForces(true); blade.rigidBody.resetTorques(true); blade.rigidBody.addForce({ x: bladeActionsToApply[0] * params.bladeForceScale, y: bladeActionsToApply[1] * params.bladeForceScale, z: bladeActionsToApply[2] * params.bladeForceScale }, true); blade.rigidBody.addTorque({ x: bladeActionsToApply[3] * params.bladeTorqueScale, y: bladeActionsToApply[4] * params.bladeTorqueScale, z: bladeActionsToApply[5] * params.bladeTorqueScale }, true); } });
         }
         function deployBlades(countToDeploy) {
-            if (!world || !player || !player.rigidBody || gameOver) return; if (userInput.bciCoherence < params.bciCoherenceBladeDeployThreshold && params.autoBattleInfluence < 50) { updateInfoDisplay(`Blade deploy failed: Coherence ${userInput.bciCoherence.toFixed(2)} too low (Min: ${params.bciCoherenceBladeDeployThreshold})`); return; }
+            if (!world || !player || !player.rigidBody || (gameOver && player.health <=0) ) return; if (userInput.bciCoherence < params.bciCoherenceBladeDeployThreshold && params.autoBattleInfluence < 50) { updateInfoDisplay(`Blade deploy failed: Coherence ${userInput.bciCoherence.toFixed(2)} too low (Min: ${params.bciCoherenceBladeDeployThreshold})`); return; }
             let deployedCount = 0; const playerPos = player.rigidBody.translation(); const playerRot = player.rigidBody.rotation(); const playerThreeQuat = new THREE.Quaternion(playerRot.x, playerRot.y, playerRot.z, playerRot.w);
             for (let i = 0; i < blades.length && deployedCount < countToDeploy; i++) { const blade = blades[i]; if (blade.isStored) { const angleOffset = (Math.PI * 2 / params.numBlades) * i; const spawnOffsetLocal = new THREE.Vector3( Math.cos(angleOffset) * (params.bladeOrbitRadiusBase * 0.5), 0.3, Math.sin(angleOffset) * (params.bladeOrbitRadiusBase * 0.5) ); const spawnPosThree = spawnOffsetLocal.applyQuaternion(playerThreeQuat).add(new THREE.Vector3(playerPos.x,playerPos.y,playerPos.z));
                 const bladeBodyDesc = RAPIER.RigidBodyDesc.dynamic().setTranslation(spawnPosThree.x, spawnPosThree.y, spawnPosThree.z).setCanSleep(false).setGravityScale(0.02).setLinearDamping(0.6).setAngularDamping(0.8); blade.rigidBody = world.createRigidBody(bladeBodyDesc); blade.collider = world.createCollider(RAPIER.ColliderDesc.cuboid(0.35, 0.04, 0.075).setDensity(0.2).setFriction(0.5).setRestitution(0.3), blade.rigidBody); blade.collider.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS); blade.rigidBody.userData = {entityType: "blade", entityId: blade.id};
@@ -698,13 +1252,14 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
         let lastFrameTime = performance.now();
         function animate() {
             requestAnimationFrame(animate); const time = performance.now(); const deltaTime = Math.min(0.05, (time - lastFrameTime) / 1000.0); lastFrameTime = time;
-            // Moved gameOver check to be inside the functions that would be affected by it
-            updatePlayerPhysicsIntent(); // Now has internal gameOver check
-            updateBCIAndHNMs(deltaTime); // Now has internal gameOver check
-            applyHNMOutputsAndDirectControlToEntities(); // Now has internal gameOver check
-            updateEnemies(deltaTime); // Now has internal gameOver check
 
-            if(world) { world.step(eventQueue); eventQueue.drainCollisionEvents((handle1, handle2, started) => { if (!started || gameOver) return; const col1 = world.getCollider(handle1); const col2 = world.getCollider(handle2); if (!col1 || !col2) return; const parentBody1 = col1.parent(); const parentBody2 = col2.parent(); const userData1 = parentBody1 ? parentBody1.userData : null; const userData2 = parentBody2 ? parentBody2.userData : null;
+            updatePlayerPhysicsIntent();
+            updateBCIAndHNMs(deltaTime);
+            applyHNMOutputsAndDirectControlToEntities();
+            updateEnemies(deltaTime);
+
+            if(world) { world.step(eventQueue); eventQueue.drainCollisionEvents((handle1, handle2, started) => { if (!started || (gameOver && player.health <=0 && enemies.filter(e=>e.health > 0).length > 0) ) return; // If player defeated, only process blade hits for remaining enemies. If all enemies defeated, stop all.
+                const col1 = world.getCollider(handle1); const col2 = world.getCollider(handle2); if (!col1 || !col2) return; const parentBody1 = col1.parent(); const parentBody2 = col2.parent(); const userData1 = parentBody1 ? parentBody1.userData : null; const userData2 = parentBody2 ? parentBody2.userData : null;
                 if (userData1 && userData1.entityType === "blade" && userData2 && userData2.entityType === "enemy") { const bladeBody = parentBody1; const bladeVelocity = bladeBody.linvel(); const speed = Math.sqrt(bladeVelocity.x**2 + bladeVelocity.y**2 + bladeVelocity.z**2); const damageMultiplier = Math.max(0.5, Math.min(2.5, speed / 5.0)); const finalDamage = BLADE_HIT_DAMAGE * damageMultiplier; handleEnemyDamage(userData2.entityId, finalDamage, userData1.entityId);
                 } else if (userData2 && userData2.entityType === "blade" && userData1 && userData1.entityType === "enemy") { const bladeBody = parentBody2; const bladeVelocity = bladeBody.linvel(); const speed = Math.sqrt(bladeVelocity.x**2 + bladeVelocity.y**2 + bladeVelocity.z**2); const damageMultiplier = Math.max(0.5, Math.min(2.5, speed / 5.0)); const finalDamage = BLADE_HIT_DAMAGE * damageMultiplier; handleEnemyDamage(userData1.entityId, finalDamage, userData2.entityId);
                 } else if (userData1 && userData1.entityType === "enemy" && userData2 && userData2.entityType === "player") { const enemy = enemies.find(e => e.id === userData1.entityId); if (enemy && enemy.attackCooldown <= 0) { handlePlayerDamage(enemy.damage, enemy.id); enemy.attackCooldown = 1.0 + Math.random() * 0.5; }
