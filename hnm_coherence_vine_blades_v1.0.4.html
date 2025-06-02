@@ -570,6 +570,7 @@ class HierarchicalSystemV5_TFJS {
 
     step(currentBotLevelStates, currentBotLastStepOutputs, sensoryInputs, externalInputsAllSources = {}, detachNextStatesMemory = true) {
         if (this.isDisposed) throw new Error(`HNS is disposed.`);
+
         const nextBotLevelStatesList = new Array(this.numLevels).fill(null);
         const newlyRetrievedValuesForAllLevelsDict = {};
         const stepAnomalies = {}; const stepWeightChanges = {};
@@ -856,62 +857,84 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             } updateHealthUIDisplay();
         }
         function updateEnemies(deltaTime) {
-            // If game over because all enemies are defeated, then stop them.
-            // If game over because player is defeated, let them continue their last actions.
             if (gameOver && enemies.filter(e => e.health > 0).length === 0) {
                 enemies.forEach(enemy => {
                     if (enemy.rigidBody) {
                         enemy.rigidBody.setLinvel({x:0, y: enemy.isFlying ? 0 : enemy.rigidBody.linvel().y, z:0}, true);
+                         // Optionally stop angular velocity too
+                        // enemy.rigidBody.setAngvel({x:0, y:0, z:0}, true);
                     }
                 });
-                return;
+                return; // All enemies defeated, stop their updates
             }
 
             const time = performance.now() * 0.001;
-            enemies.forEach(enemy => { if (enemy.health <= 0 || !enemy.rigidBody || !player || !player.rigidBody) return; const enemyPos = enemy.rigidBody.translation(); const playerPosVec = player.rigidBody.translation();
-                if (enemy.isFlying) { const targetFlyHeight = playerPosVec.y + 2.0 + Math.sin(time * 0.3 + enemy.id.hashCode() * 0.1) * 1.5; const directionToPlayer3D = new THREE.Vector3(playerPosVec.x - enemyPos.x, targetFlyHeight - enemyPos.y, playerPosVec.z - enemyPos.z); if (directionToPlayer3D.lengthSq() > 0.1) { directionToPlayer3D.normalize(); const enemySpeed = 2.0 + enemy.level * 0.25; enemy.rigidBody.setLinvel({ x: directionToPlayer3D.x * enemySpeed, y: directionToPlayer3D.y * enemySpeed, z: directionToPlayer3D.z * enemySpeed }, true); }
-                } else { const directionToPlayer = new THREE.Vector3(playerPosVec.x - enemyPos.x, 0, playerPosVec.z - enemyPos.z); if (directionToPlayer.lengthSq() > 0.1) { directionToPlayer.normalize(); const enemySpeed = 3.0 + enemy.level * 0.5; enemy.rigidBody.setLinvel({ x: directionToPlayer.x * enemySpeed, y: enemy.rigidBody.linvel().y, z: directionToPlayer.z * enemySpeed }, true); } }
-                if (enemy.attackCooldown > 0) { enemy.attackCooldown -= deltaTime; } });
+            enemies.forEach(enemy => {
+                if (enemy.health <= 0 || !enemy.rigidBody || !player || !player.rigidBody) return;
+
+                const enemyPos = enemy.rigidBody.translation();
+                const playerPosVec = player.rigidBody.translation(); 
+
+                if (enemy.isFlying) {
+                    const targetFlyHeight = playerPosVec.y + 2.0 + Math.sin(time * 0.3 + enemy.id.hashCode() * 0.1) * 1.5;
+                    const directionToPlayer3D = new THREE.Vector3(playerPosVec.x - enemyPos.x, targetFlyHeight - enemyPos.y, playerPosVec.z - enemyPos.z);
+                    if (directionToPlayer3D.lengthSq() > 0.1) {
+                        directionToPlayer3D.normalize();
+                        const enemySpeed = 2.0 + enemy.level * 0.25;
+                        enemy.rigidBody.setLinvel({ x: directionToPlayer3D.x * enemySpeed, y: directionToPlayer3D.y * enemySpeed, z: directionToPlayer3D.z * enemySpeed }, true);
+                    }
+                } else {
+                    const directionToPlayer = new THREE.Vector3(playerPosVec.x - enemyPos.x, 0, playerPosVec.z - enemyPos.z);
+                    if (directionToPlayer.lengthSq() > 0.1) {
+                        directionToPlayer.normalize();
+                        const enemySpeed = 3.0 + enemy.level * 0.5;
+                        const currentYVel = enemy.rigidBody.linvel().y;
+                        enemy.rigidBody.setLinvel({ x: directionToPlayer.x * enemySpeed, y: currentYVel, z: directionToPlayer.z * enemySpeed }, true);
+                    }
+                }
+                if (enemy.attackCooldown > 0) {
+                    enemy.attackCooldown -= deltaTime;
+                }
+            });
         }
         function handlePlayerDamage(amount, source = "unknown") {
-            if (gameOver && player.health <= 0) return; // Prevent further damage if already game over by player defeat
+            // if (gameOver && player.health <= 0) return; // This was preventing the one-time game over logic
+            if (player.health <= 0 && gameOver) return; // Already processed defeat
+
             player.health -= amount;
             updateInfoDisplay(`Player took ${amount} damage from ${source}! Health: ${player.health}`);
             updateHealthUIDisplay();
-            if (player.health <= 0 && !gameOver) { // Check !gameOver to ensure this block runs only once for player defeat
-                player.health = 0;
+
+            if (player.health <= 0 && !gameOver) { 
+                player.health = 0; // Clamp health at 0
                 gameOver = true;
                 updateInfoDisplay("Player Defeated! Training session will restart.");
 
-                // Explicitly stop vine segments
                 if (vine && vine.segments) {
                     vine.segments.forEach(seg => {
                         if (seg.rigidBody) {
-                            seg.rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+                            const currentLinvel = seg.rigidBody.linvel();
+                            seg.rigidBody.setLinvel({ x: 0, y: currentLinvel.y, z: 0 }, true); 
                             seg.rigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
-                            seg.rigidBody.resetForces(true);
-                            seg.rigidBody.resetTorques(true);
                         }
                     });
                 }
-                // Also stop blades
                 blades.forEach(blade => {
                     if (!blade.isStored && blade.rigidBody) {
-                        blade.rigidBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+                        const currentLinvel = blade.rigidBody.linvel();
+                        blade.rigidBody.setLinvel({ x: 0, y: currentLinvel.y, z: 0 }, true);
                         blade.rigidBody.setAngvel({ x: 0, y: 0, z: 0 }, true);
-                        blade.rigidBody.resetForces(true);
-                        blade.rigidBody.resetTorques(true);
                     }
                 });
                 setTimeout(() => initDemo(true), 3000);
             }
         }
         function handleEnemyDamage(enemyId, amount, source="unknown") {
-            if (gameOver && enemies.filter(e => e.health > 0).length === 0) return; // Prevent further enemy damage if game over by all enemies defeated
+            if (gameOver && enemies.filter(e => e.health > 0).length === 0) return; 
             const enemy = enemies.find(e => e.id === enemyId);
             if (enemy && enemy.health > 0) { enemy.health -= amount; updateInfoDisplay(`Enemy ${enemyId} took ${amount} damage from ${source}! Health: ${enemy.health}`); updateHealthUIDisplay();
                 if (enemy.health <= 0) { enemy.health = 0; updateInfoDisplay(`Enemy ${enemyId} defeated!`); if (enemy.rigidBody) world.removeRigidBody(enemy.rigidBody); if (enemy.mesh) scene.remove(enemy.mesh); enemies = enemies.filter(e => e.id !== enemyId);
-                    if (enemies.filter(e => e.health > 0).length === 0 && !gameOver) { // Check !gameOver to ensure this block runs only once for all enemies defeated
+                    if (enemies.filter(e => e.health > 0).length === 0 && !gameOver) { 
                         gameOver = true;
                         updateInfoDisplay("All enemies defeated! Training session complete. Restarting...");
                         setTimeout(() => initDemo(true), 3000);
@@ -946,7 +969,7 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
                 addSafeEventListener(window, 'mousemove', (event) => { if (userInput.isPointerLocked) { userInput.cameraYaw -= event.movementX * params.mouseSensitivity; userInput.cameraPitch += event.movementY * params.mouseSensitivity; userInput.cameraPitch = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, userInput.cameraPitch)); } if (userInput.isBCIModeActive) { userInput.bciCommandTargetScreen.set((event.clientX / window.innerWidth), (event.clientY / window.innerHeight)); } });
                 addSafeEventListener(window, 'mousedown', (event) => { if (event.button === 0 && userInput.isBCIModeActive && event.ctrlKey) { event.preventDefault(); userInput.bciAction = true; if (userInput.isDirectControllingVine) userInput.directControlActionActive = true; }});
                 addSafeEventListener(window, 'mouseup', (event) => { if (event.button === 0 && userInput.isBCIModeActive && event.ctrlKey) { event.preventDefault(); userInput.bciAction = false; userInput.directControlActionActive = false;} });
-                addSafeEventListener(window, 'keydown', (event) => { if (event.repeat || gameOver) return; if (event.key.toLowerCase() === 'shift') userInput.isBCIModeActive = true; if (event.key.toLowerCase() === 'control' && userInput.isBCIModeActive) { userInput.bciAction = true; if (userInput.isDirectControllingVine) userInput.directControlActionActive = true;} if (event.key.toLowerCase() === 'v' && !event.ctrlKey && !event.shiftKey) { userInput.isDirectControllingVine = !userInput.isDirectControllingVine; updateInfoDisplay(); } if (event.key.toLowerCase() === '1' && !event.ctrlKey && !event.shiftKey) deployBlades(1); if (event.key.toLowerCase() === 'r' && !event.ctrlKey && !event.shiftKey) recallAllBladesFunction();
+                addSafeEventListener(window, 'keydown', (event) => { if (event.repeat || (gameOver && player.health <=0) ) return; if (event.key.toLowerCase() === 'shift') userInput.isBCIModeActive = true; if (event.key.toLowerCase() === 'control' && userInput.isBCIModeActive) { userInput.bciAction = true; if (userInput.isDirectControllingVine) userInput.directControlActionActive = true;} if (event.key.toLowerCase() === 'v' && !event.ctrlKey && !event.shiftKey) { userInput.isDirectControllingVine = !userInput.isDirectControllingVine; updateInfoDisplay(); } if (event.key.toLowerCase() === '1' && !event.ctrlKey && !event.shiftKey) deployBlades(1); if (event.key.toLowerCase() === 'r' && !event.ctrlKey && !event.shiftKey) recallAllBladesFunction();
                     switch(event.key.toLowerCase()) { case 'w': userInput.moveForward = 1; break; case 's': userInput.moveBackward = 1; break; case 'a': userInput.moveLeft = 1; break; case 'd': userInput.moveRight = 1; break; case ' ': userInput.jump = true; event.preventDefault(); break; } });
                 addSafeEventListener(window, 'keyup', (event) => { if (gameOver && player.health <= 0) return; if (event.key.toLowerCase() === 'shift') { userInput.isBCIModeActive = false; if (!event.ctrlKey) {userInput.bciAction = false; userInput.directControlActionActive = false;}} if (event.key.toLowerCase() === 'control') { userInput.bciAction = false; userInput.directControlActionActive = false; if (!event.shiftKey) userInput.isBCIModeActive = false; }
                     switch(event.key.toLowerCase()) { case 'w': userInput.moveForward = 0; break; case 's': userInput.moveBackward = 0; break; case 'a': userInput.moveLeft = 0; break; case 'd': userInput.moveRight = 0; break; } });
@@ -954,25 +977,62 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
         }
         function updatePlayerPhysicsIntent() {
             if (!player || !player.rigidBody) return;
-            if (gameOver && player.health <=0) { // Only freeze player if they are defeated
-                player.rigidBody.setLinvel({x:0, y:player.rigidBody.linvel().y, z:0}, true);
+
+            const playerPhysicsPos = player.rigidBody.translation();
+            const playerPhysicsLinvel = player.rigidBody.linvel();
+            player.rigidBody.resetForces(true); 
+
+            if (gameOver && player.health <= 0) {
+                // Player is defeated, let physics take over fully.
+                // No user/AI input should control movement.
+                // Angular velocity lock might already be set, or could be unlocked here if desired:
+                // player.rigidBody.lockRotations(false, true); 
                 return;
             }
 
-            const playerPhysicsPos = player.rigidBody.translation(); const playerPhysicsLinvel = player.rigidBody.linvel(); player.rigidBody.resetForces(true);
-            let finalMoveDirection = new THREE.Vector3(); let yVel = playerPhysicsLinvel.y;
-            const playerMoveDirection = new THREE.Vector3(); const playerFlatForward = new THREE.Vector3(Math.sin(userInput.cameraYaw), 0, Math.cos(userInput.cameraYaw)).normalize(); const playerRight = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), playerFlatForward).normalize();
-            if (userInput.moveForward) playerMoveDirection.add(playerFlatForward); if (userInput.moveBackward) playerMoveDirection.sub(playerFlatForward); if (userInput.moveLeft) playerMoveDirection.add(playerRight); if (userInput.moveRight) playerMoveDirection.sub(playerRight);
+            let finalMoveDirection = new THREE.Vector3();
+            let yVel = playerPhysicsLinvel.y;
+            const playerMoveDirection = new THREE.Vector3();
+            const playerFlatForward = new THREE.Vector3(Math.sin(userInput.cameraYaw), 0, Math.cos(userInput.cameraYaw)).normalize();
+            const playerRight = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), playerFlatForward).normalize();
+
+            if (userInput.moveForward) playerMoveDirection.add(playerFlatForward);
+            if (userInput.moveBackward) playerMoveDirection.sub(playerFlatForward);
+            if (userInput.moveLeft) playerMoveDirection.add(playerRight);
+            if (userInput.moveRight) playerMoveDirection.sub(playerRight);
             playerMoveDirection.normalize().multiplyScalar(params.playerSpeed);
+
             const autoBattleMoveDirection = player.autoBattleTargetVelocity.clone();
             finalMoveDirection.lerpVectors(playerMoveDirection, autoBattleMoveDirection, params.autoBattleInfluence / 100.0);
-            const ray = new RAPIER.Ray(playerPhysicsPos, { x: 0, y: -1, z: 0 }); const hit = world.castRay(ray, 0.65, true, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS, undefined, player.collider); player.isOnGround = hit ? true : false;
-            if (userInput.jump && player.isOnGround) { yVel = params.playerJumpForce; userInput.jump = false; }
+
+            const ray = new RAPIER.Ray(playerPhysicsPos, { x: 0, y: -1, z: 0 });
+            const hit = world.castRay(ray, 0.65, true, RAPIER.QueryFilterFlags.EXCLUDE_SENSORS, undefined, player.collider);
+            player.isOnGround = hit ? true : false;
+
+            if (userInput.jump && player.isOnGround) {
+                yVel = params.playerJumpForce;
+                userInput.jump = false;
+            }
+
             let newLinvel = { x: finalMoveDirection.x, y: yVel, z: finalMoveDirection.z };
-            if (player.isOnGround && finalMoveDirection.lengthSq() < 0.01 && params.autoBattleInfluence < 50) { newLinvel.x = playerPhysicsLinvel.x * 0.1; newLinvel.z = playerPhysicsLinvel.z * 0.1; }
+            if (player.isOnGround && finalMoveDirection.lengthSq() < 0.01 && params.autoBattleInfluence < 50) {
+                newLinvel.x = playerPhysicsLinvel.x * 0.1;
+                newLinvel.z = playerPhysicsLinvel.z * 0.1;
+            }
             player.rigidBody.setLinvel(newLinvel, true);
-            if (params.autoBattleInfluence / 100.0 > 0.5 && player.autoBattleFaceEnemy && player.autoBattleTargetEnemyPos.lengthSq() > 0.001) { const directionToTarget = new THREE.Vector3().subVectors(player.autoBattleTargetEnemyPos, player.mesh.position); directionToTarget.y = 0; if (directionToTarget.lengthSq() > 0.001) { const targetYaw = Math.atan2(directionToTarget.x, directionToTarget.z); const visualRotationQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), targetYaw); player.mesh.quaternion.slerp(visualRotationQuaternion, 0.15); }
-            } else { const visualRotationQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), userInput.cameraYaw); player.mesh.quaternion.copy(visualRotationQuaternion); }
+            
+            if (params.autoBattleInfluence / 100.0 > 0.5 && player.autoBattleFaceEnemy && player.autoBattleTargetEnemyPos.lengthSq() > 0.001) {
+                const directionToTarget = new THREE.Vector3().subVectors(player.autoBattleTargetEnemyPos, player.mesh.position);
+                directionToTarget.y = 0;
+                if (directionToTarget.lengthSq() > 0.001) {
+                    const targetYaw = Math.atan2(directionToTarget.x, directionToTarget.z);
+                    const visualRotationQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), targetYaw);
+                    player.mesh.quaternion.slerp(visualRotationQuaternion, 0.15);
+                }
+            } else {
+                const visualRotationQuaternion = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), userInput.cameraYaw);
+                player.mesh.quaternion.copy(visualRotationQuaternion);
+            }
         }
         function getEntitySensoryData(entity, playerEntity, currentBciTargetWorld, entityType = "vine_segment", allBlades = []) {
             const pos = entity.rigidBody.translation(); const vel = entity.rigidBody.linvel(); const rot = entity.rigidBody.rotation(); const playerPos = playerEntity.rigidBody.translation(); const playerRot = playerEntity.rigidBody.rotation();
@@ -1171,41 +1231,193 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
         }
         function updateBCIAndHNMs(deltaTime) {
             if (!player || !player.rigidBody) return;
-             if (gameOver && player.health <= 0) { // Only decay BCI if player is defeated
+
+            // BCI Coherence decay, regardless of player health, unless game over for all enemies.
+            if (!(gameOver && enemies.filter(e => e.health > 0).length === 0)) {
                 userInput.bciCoherence = Math.max(0.0, userInput.bciCoherence - params.bciCoherenceDecayRate * deltaTime * 60);
-                userInput.bciAction = false;
-                if (bciTargetWorldIndicatorMesh) bciTargetWorldIndicatorMesh.style.display = 'none';
-                // Don't return early if game over is due to all enemies defeated, HNM might still run for a bit
-                if (player.health <= 0) return;
+                 if (player.health <= 0) { // If player is defeated, ensure BCI action is off
+                    userInput.bciAction = false;
+                }
+            } else { // All enemies defeated, freeze BCI
+                 if (bciTargetWorldIndicatorMesh) bciTargetWorldIndicatorMesh.style.display = 'none';
+                 return; // No further BCI/HNM updates if all enemies are gone
             }
-            const playerPosVec = player.rigidBody.translation(); const playerPos = new THREE.Vector3(playerPosVec.x, playerPosVec.y, playerPosVec.z);
-            let playerRawBciTargetScreen = new THREE.Vector2(0,0); let playerIsActivelyBciAiming = false; let playerWantsBciActionThisFrame = false;
-            if (userInput.isBCITouchAiming) { playerRawBciTargetScreen.copy(userInput.bciCommandTargetScreen); playerIsActivelyBciAiming = true; playerWantsBciActionThisFrame = userInput.bciAction; } else if (userInput.isBCIModeActive) { playerRawBciTargetScreen.copy(userInput.bciCommandTargetScreen); playerIsActivelyBciAiming = true; playerWantsBciActionThisFrame = userInput.bciAction; }
-            const playerAimMovementDelta = playerRawBciTargetScreen.distanceTo(userInput.bciCommandTargetLastScreen); let tempPlayerCoherence = userInput.bciCoherence;
-            if (playerIsActivelyBciAiming) { if (playerWantsBciActionThisFrame) { if (playerAimMovementDelta < params.bciAimStabilityThreshold) tempPlayerCoherence = Math.min(1.0, tempPlayerCoherence + params.bciCoherenceBuildRate * 2.5 * deltaTime * 60); else tempPlayerCoherence = Math.min(1.0, tempPlayerCoherence + params.bciCoherenceBuildRate * 0.8 * deltaTime * 60); } else { if (playerAimMovementDelta < params.bciAimStabilityThreshold * 0.5) tempPlayerCoherence = Math.min(1.0, tempPlayerCoherence + params.bciCoherenceBuildRate * 0.5 * deltaTime * 60); else tempPlayerCoherence = Math.max(0.0, tempPlayerCoherence - params.bciCoherenceDecayRate * 0.7 * deltaTime * 60); }
-            } else { tempPlayerCoherence = Math.max(0.0, tempPlayerCoherence - params.bciCoherenceDecayRate * deltaTime * 60); } const finalPlayerCoherence = tempPlayerCoherence;
-            let finalPlayerBciTargetWorld = new THREE.Vector3(); if (playerIsActivelyBciAiming) { const ndcPlayerTarget = new THREE.Vector3(playerRawBciTargetScreen.x * 2 - 1, -playerRawBciTargetScreen.y * 2 + 1, 0.5); const unprojected = ndcPlayerTarget.unproject(camera); finalPlayerBciTargetWorld.copy(camera.position).addScaledVector(unprojected.sub(camera.position).normalize(), params.bciTargetDistance); } else { const playerForward = new THREE.Vector3(0,0,-1).applyQuaternion(player.mesh.quaternion); finalPlayerBciTargetWorld.copy(playerPos).addScaledVector(playerForward, 4.0).add(new THREE.Vector3(0,0.5,0)); }
-            const finalPlayerWantsBciAction = playerIsActivelyBciAiming && playerWantsBciActionThisFrame && (finalPlayerCoherence >= params.bciCoherenceMinActionThreshold);
-            let autoBattleBciTargetWorld = new THREE.Vector3().copy(finalPlayerBciTargetWorld); let autoBattleCoherence = 0.0; let autoBattleWantsBciAction = false;
-            if (params.autoBattleInfluence > 0) { player.autoBattleTargetVelocity.set(0,0,0); player.autoBattleFaceEnemy = false;
-                if (enemies.filter(e => e.health > 0).length > 0) { let closestEnemy = null; let minDistanceSq = Infinity; enemies.forEach(enemy => { if (enemy.rigidBody && enemy.health > 0) { const enemyP = enemy.rigidBody.translation(); const distSq = playerPos.distanceToSquared(new THREE.Vector3(enemyP.x, enemyP.y, enemyP.z)); if (distSq < minDistanceSq) { minDistanceSq = distSq; closestEnemy = enemy; } } });
-                    if (closestEnemy && closestEnemy.rigidBody) { const enemyPosVec = closestEnemy.rigidBody.translation(); const enemyPosTHREE = new THREE.Vector3(enemyPosVec.x, enemyPosVec.y, enemyPosVec.z); autoBattleBciTargetWorld.copy(enemyPosTHREE); player.autoBattleFaceEnemy = true; player.autoBattleTargetEnemyPos.copy(enemyPosTHREE); const distanceToEnemy = Math.sqrt(minDistanceSq); const desiredDistance = params.bladeOrbitRadiusBase * 1.8; const directionToEnemyWorld = new THREE.Vector3().subVectors(enemyPosTHREE, playerPos); if (!closestEnemy.isFlying) directionToEnemyWorld.y = 0; if(directionToEnemyWorld.lengthSq() > 0.01) directionToEnemyWorld.normalize(); if (distanceToEnemy > desiredDistance + 0.5) player.autoBattleTargetVelocity.copy(directionToEnemyWorld).multiplyScalar(params.playerSpeed); else if (distanceToEnemy < desiredDistance - 0.5) player.autoBattleTargetVelocity.copy(directionToEnemyWorld).multiplyScalar(-params.playerSpeed); if (!closestEnemy.isFlying && Math.random() < 0.015 && player.isOnGround) userInput.jump = true; autoBattleCoherence = 0.85;
-                         autoBattleWantsBciAction = true;
-                         if (distanceToEnemy < params.bciTargetDistance * 0.95) { const activeBladesCount = blades.filter(b => !b.isStored).length; if (activeBladesCount < params.numBlades && Math.random() < 0.08 * (params.autoBattleInfluence/100)) deployBlades(1); }
-                    } else { autoBattleCoherence = 0.1; } } else { autoBattleCoherence = 0.05; } }
-            const abInfluenceRatio = params.autoBattleInfluence / 100.0; bciTargetWorld.lerpVectors(finalPlayerBciTargetWorld, autoBattleBciTargetWorld, abInfluenceRatio); userInput.bciCoherence = THREE.MathUtils.lerp(finalPlayerCoherence, autoBattleCoherence, abInfluenceRatio);
-            const playerActionProbability = finalPlayerWantsBciAction ? (1.0 - abInfluenceRatio) : 0.0; const autoBattleActionProbability = autoBattleWantsBciAction ? abInfluenceRatio : 0.0;
-            if (playerActionProbability > Math.random() && playerActionProbability > autoBattleActionProbability) { userInput.bciAction = true; } else if (autoBattleActionProbability > Math.random()) { userInput.bciAction = true; } else { userInput.bciAction = false; }
-            userInput.bciCommandTargetLastScreen.copy(playerRawBciTargetScreen);
-            if (userInput.bciCoherence > 0.05 && (playerIsActivelyBciAiming || params.autoBattleInfluence > 0)) { bciTargetWorldIndicatorMesh.style.display = 'block'; const screenPos = bciTargetWorld.clone().project(camera); bciTargetWorldIndicatorMesh.style.left = `${(screenPos.x * 0.5 + 0.5) * window.innerWidth}px`; bciTargetWorldIndicatorMesh.style.top = `${(-screenPos.y * 0.5 + 0.5) * window.innerHeight}px`; bciTargetWorldIndicatorMesh.style.opacity = userInput.bciCoherence * 0.7 + 0.15; } else { bciTargetWorldIndicatorMesh.style.display = 'none'; }
-            if (vine.segments.length > 0) { const vineRuleTensor = generateVineRuleActionVector(vine, player, bciTargetWorld, userInput.bciCoherence, userInput.bciAction); ruleBasedActions.vine = vineRuleTensor.dataSync(); vineRuleTensor.dispose(); }
-            blades.forEach((blade, index) => { if (!blade.isStored && blade.rigidBody) { const bladeRuleTensor = generateBladeRuleActionVector(blade, player, bciTargetWorld, userInput.bciCoherence, userInput.bciAction, deltaTime); ruleBasedActions.blades[index] = bladeRuleTensor.dataSync(); bladeRuleTensor.dispose(); } else { ruleBasedActions.blades[index] = null; } });
+            
+            // If player is defeated, don't process their BCI inputs for aim/action, but HNM might still run with decayed coherence.
+            if (player.health > 0) {
+                const playerPosVec = player.rigidBody.translation(); 
+                const playerPos = new THREE.Vector3(playerPosVec.x, playerPosVec.y, playerPosVec.z);
+                let playerRawBciTargetScreen = new THREE.Vector2(0,0); 
+                let playerIsActivelyBciAiming = false; 
+                let playerWantsBciActionThisFrame = false;
+
+                if (userInput.isBCITouchAiming) { 
+                    playerRawBciTargetScreen.copy(userInput.bciCommandTargetScreen); 
+                    playerIsActivelyBciAiming = true; 
+                    playerWantsBciActionThisFrame = userInput.bciAction; 
+                } else if (userInput.isBCIModeActive) { 
+                    playerRawBciTargetScreen.copy(userInput.bciCommandTargetScreen); 
+                    playerIsActivelyBciAiming = true; 
+                    playerWantsBciActionThisFrame = userInput.bciAction; 
+                }
+                
+                const playerAimMovementDelta = playerRawBciTargetScreen.distanceTo(userInput.bciCommandTargetLastScreen); 
+                let tempPlayerCoherence = userInput.bciCoherence;
+                if (playerIsActivelyBciAiming) { 
+                    if (playerWantsBciActionThisFrame) { 
+                        if (playerAimMovementDelta < params.bciAimStabilityThreshold) tempPlayerCoherence = Math.min(1.0, tempPlayerCoherence + params.bciCoherenceBuildRate * 2.5 * deltaTime * 60); 
+                        else tempPlayerCoherence = Math.min(1.0, tempPlayerCoherence + params.bciCoherenceBuildRate * 0.8 * deltaTime * 60); 
+                    } else { 
+                        if (playerAimMovementDelta < params.bciAimStabilityThreshold * 0.5) tempPlayerCoherence = Math.min(1.0, tempPlayerCoherence + params.bciCoherenceBuildRate * 0.5 * deltaTime * 60); 
+                        else tempPlayerCoherence = Math.max(0.0, tempPlayerCoherence - params.bciCoherenceDecayRate * 0.7 * deltaTime * 60); 
+                    }
+                } // If not actively aiming, decay is handled by the general decay at the start of function.
+                const finalPlayerCoherence = tempPlayerCoherence;
+                userInput.bciCoherence = finalPlayerCoherence; // Update global coherence based on player input
+
+                let finalPlayerBciTargetWorld = new THREE.Vector3(); 
+                if (playerIsActivelyBciAiming) { 
+                    const ndcPlayerTarget = new THREE.Vector3(playerRawBciTargetScreen.x * 2 - 1, -playerRawBciTargetScreen.y * 2 + 1, 0.5); 
+                    const unprojected = ndcPlayerTarget.unproject(camera); 
+                    finalPlayerBciTargetWorld.copy(camera.position).addScaledVector(unprojected.sub(camera.position).normalize(), params.bciTargetDistance); 
+                } else { 
+                    const playerForward = new THREE.Vector3(0,0,-1).applyQuaternion(player.mesh.quaternion); 
+                    finalPlayerBciTargetWorld.copy(playerPos).addScaledVector(playerForward, 4.0).add(new THREE.Vector3(0,0.5,0)); 
+                }
+                bciTargetWorld.copy(finalPlayerBciTargetWorld); // Player directly controls BCI target world when alive
+                userInput.bciAction = playerIsActivelyBciAiming && playerWantsBciActionThisFrame && (finalPlayerCoherence >= params.bciCoherenceMinActionThreshold);
+                userInput.bciCommandTargetLastScreen.copy(playerRawBciTargetScreen);
+            }
+
+
+            // Auto-battle AI influence (even if player is defeated, AI might take over BCI target conceptually)
+            let autoBattleBciTargetWorld = new THREE.Vector3().copy(bciTargetWorld); // Start with current (player or decayed) BCI target
+            let autoBattleCoherenceContribution = 0.0; 
+            let autoBattleWantsActionContribution = false;
+
+            if (params.autoBattleInfluence > 0) { 
+                player.autoBattleTargetVelocity.set(0,0,0); player.autoBattleFaceEnemy = false;
+                if (enemies.filter(e => e.health > 0).length > 0) { 
+                    let closestEnemy = null; let minDistanceSq = Infinity; 
+                    const playerCurrentPos = player.rigidBody.translation(); // Use current RB pos
+                    enemies.forEach(enemy => { 
+                        if (enemy.rigidBody && enemy.health > 0) { 
+                            const enemyP = enemy.rigidBody.translation(); 
+                            const distSq = (new THREE.Vector3(playerCurrentPos.x,playerCurrentPos.y,playerCurrentPos.z)).distanceToSquared(new THREE.Vector3(enemyP.x, enemyP.y, enemyP.z)); 
+                            if (distSq < minDistanceSq) { minDistanceSq = distSq; closestEnemy = enemy; } 
+                        } 
+                    });
+                    if (closestEnemy && closestEnemy.rigidBody) { 
+                        const enemyPosVec = closestEnemy.rigidBody.translation(); 
+                        const enemyPosTHREE = new THREE.Vector3(enemyPosVec.x, enemyPosVec.y, enemyPosVec.z); 
+                        autoBattleBciTargetWorld.copy(enemyPosTHREE); 
+                        if (player.health > 0) { // Only make player face/move if alive
+                            player.autoBattleFaceEnemy = true; 
+                            player.autoBattleTargetEnemyPos.copy(enemyPosTHREE);
+                            const distanceToEnemy = Math.sqrt(minDistanceSq); 
+                            const desiredDistance = params.bladeOrbitRadiusBase * 1.8; 
+                            const directionToEnemyWorld = new THREE.Vector3().subVectors(enemyPosTHREE, new THREE.Vector3(playerCurrentPos.x,playerCurrentPos.y,playerCurrentPos.z) ); 
+                            if (!closestEnemy.isFlying) directionToEnemyWorld.y = 0; 
+                            if(directionToEnemyWorld.lengthSq() > 0.01) directionToEnemyWorld.normalize(); 
+                            if (distanceToEnemy > desiredDistance + 0.5) player.autoBattleTargetVelocity.copy(directionToEnemyWorld).multiplyScalar(params.playerSpeed); 
+                            else if (distanceToEnemy < desiredDistance - 0.5) player.autoBattleTargetVelocity.copy(directionToEnemyWorld).multiplyScalar(-params.playerSpeed); 
+                            if (!closestEnemy.isFlying && Math.random() < 0.015 && player.isOnGround) userInput.jump = true; 
+                        }
+                        autoBattleCoherenceContribution = 0.85;
+                        autoBattleWantsActionContribution = true;
+                        if (player.health > 0 && Math.sqrt(minDistanceSq) < params.bciTargetDistance * 0.95) { 
+                            const activeBladesCount = blades.filter(b => !b.isStored).length; 
+                            if (activeBladesCount < params.numBlades && Math.random() < 0.08 * (params.autoBattleInfluence/100)) deployBlades(1); 
+                        }
+                    } else { autoBattleCoherenceContribution = 0.1; } 
+                } else { autoBattleCoherenceContribution = 0.05; } 
+            }
+            
+            // Blend BCI target, coherence, and action based on autoBattleInfluence
+            const abInfluenceRatio = params.autoBattleInfluence / 100.0;
+            if (player.health > 0) { // If player alive, their BCI target contributes
+                bciTargetWorld.lerpVectors(bciTargetWorld, autoBattleBciTargetWorld, abInfluenceRatio);
+                userInput.bciCoherence = THREE.MathUtils.lerp(userInput.bciCoherence, autoBattleCoherenceContribution, abInfluenceRatio);
+                // Action blending: If player wants action and AI doesn't, it's (1-abInfluenceRatio) chance. If AI wants and player doesn't, it's abInfluenceRatio chance. If both, it's combined.
+                const playerWants = userInput.bciAction; // Based on player's direct input
+                const aiWants = autoBattleWantsActionContribution;
+                if (playerWants && aiWants) userInput.bciAction = true;
+                else if (playerWants) userInput.bciAction = (Math.random() < (1.0 - abInfluenceRatio));
+                else if (aiWants) userInput.bciAction = (Math.random() < abInfluenceRatio);
+                else userInput.bciAction = false;
+
+            } else { // Player defeated, AI fully drives BCI concept for HNM
+                bciTargetWorld.copy(autoBattleBciTargetWorld);
+                userInput.bciCoherence = autoBattleCoherenceContribution;
+                userInput.bciAction = autoBattleWantsActionContribution;
+            }
+            
+            // Update BCI target world indicator
+            if (userInput.bciCoherence > 0.05) { // Show if any coherence, regardless of who is driving it
+                bciTargetWorldIndicatorMesh.style.display = 'block'; 
+                const screenPos = bciTargetWorld.clone().project(camera); 
+                bciTargetWorldIndicatorMesh.style.left = `${(screenPos.x * 0.5 + 0.5) * window.innerWidth}px`; 
+                bciTargetWorldIndicatorMesh.style.top = `${(-screenPos.y * 0.5 + 0.5) * window.innerHeight}px`; 
+                bciTargetWorldIndicatorMesh.style.opacity = userInput.bciCoherence * 0.7 + 0.15; 
+            } else { bciTargetWorldIndicatorMesh.style.display = 'none'; }
+
+            if (vine.segments.length > 0) { 
+                const vineRuleTensor = generateVineRuleActionVector(vine, player, bciTargetWorld, userInput.bciCoherence, userInput.bciAction); 
+                ruleBasedActions.vine = vineRuleTensor.dataSync(); 
+                vineRuleTensor.dispose(); 
+            }
+            blades.forEach((blade, index) => { 
+                if (!blade.isStored && blade.rigidBody) { 
+                    const bladeRuleTensor = generateBladeRuleActionVector(blade, player, bciTargetWorld, userInput.bciCoherence, userInput.bciAction, deltaTime); 
+                    ruleBasedActions.blades[index] = bladeRuleTensor.dataSync(); 
+                    bladeRuleTensor.dispose(); 
+                } else { ruleBasedActions.blades[index] = null; } 
+            });
+
             if (params.enableHNM) {
-                tf.tidy(() => { const finalBciCommandTensorForHNM = bciProcessor.process(userInput, bciTargetWorld);
-                    if (hnmVine && hnmVine.system && !hnmVine.system.isDisposed && vine.segments.length > 0) { const representativeVineSegment = vine.segments[Math.floor(params.numVineSegments / 2)]; if (representativeVineSegment && representativeVineSegment.rigidBody) { const vineSensoryData = getEntitySensoryData(representativeVineSegment, player, bciTargetWorld, "vine_segment", blades); const vineRuleActionForHNMInput = tf.tensor1d(ruleBasedActions.vine || new Array(params.numVineSegments * VINE_RULE_ACTION_DIM_PER_SEGMENT).fill(0)).expandDims(0).expandDims(0); const vineCombinedExternalInput = tf.concat([finalBciCommandTensorForHNM.clone(), vineRuleActionForHNMInput], 2); const vineExtInputName = hnmVine.system.levelConfigsOriginal[0].external_input_config?.source_signal_name; const vineExtInputs = vineExtInputName ? { [vineExtInputName]: vineCombinedExternalInput } : {}; const vineHnmResult = runHNMStepImplModified(hnmVine, vineSensoryData, vineExtInputs); if (vineHnmResult) { hnmPredictedActions.vine = vineHnmResult.policyActions; if (vineHnmResult.anomalies) { params.displayVineAnomalies.L0 = vineHnmResult.anomalies.L0_Vine_Sensorimotor ? vineHnmResult.anomalies.L0_Vine_Sensorimotor.dataSync()[0] : 0; params.displayVineAnomalies.L1 = vineHnmResult.anomalies.L1_Vine_Context ? vineHnmResult.anomalies.L1_Vine_Context.dataSync()[0] : 0; Object.values(vineHnmResult.anomalies).forEach(t => { if (t && !t.isDisposed) t.dispose(); }); } } else { hnmPredictedActions.vine = null;} } }
+                tf.tidy(() => { 
+                    const finalBciCommandTensorForHNM = bciProcessor.process(userInput, bciTargetWorld);
+                    if (hnmVine && hnmVine.system && !hnmVine.system.isDisposed && vine.segments.length > 0) { 
+                        const representativeVineSegment = vine.segments[Math.floor(params.numVineSegments / 2)]; 
+                        if (representativeVineSegment && representativeVineSegment.rigidBody) { 
+                            const vineSensoryData = getEntitySensoryData(representativeVineSegment, player, bciTargetWorld, "vine_segment", blades); 
+                            const vineRuleActionForHNMInput = tf.tensor1d(ruleBasedActions.vine || new Array(params.numVineSegments * VINE_RULE_ACTION_DIM_PER_SEGMENT).fill(0)).expandDims(0).expandDims(0); 
+                            const vineCombinedExternalInput = tf.concat([finalBciCommandTensorForHNM.clone(), vineRuleActionForHNMInput], 2); 
+                            const vineExtInputName = hnmVine.system.levelConfigsOriginal[0].external_input_config?.source_signal_name; 
+                            const vineExtInputs = vineExtInputName ? { [vineExtInputName]: vineCombinedExternalInput } : {}; 
+                            const vineHnmResult = runHNMStepImplModified(hnmVine, vineSensoryData, vineExtInputs); 
+                            if (vineHnmResult) { 
+                                hnmPredictedActions.vine = vineHnmResult.policyActions; 
+                                if (vineHnmResult.anomalies) { 
+                                    params.displayVineAnomalies.L0 = vineHnmResult.anomalies.L0_Vine_Sensorimotor ? vineHnmResult.anomalies.L0_Vine_Sensorimotor.dataSync()[0] : 0; 
+                                    params.displayVineAnomalies.L1 = vineHnmResult.anomalies.L1_Vine_Context ? vineHnmResult.anomalies.L1_Vine_Context.dataSync()[0] : 0; 
+                                    Object.values(vineHnmResult.anomalies).forEach(t => { if (t && !t.isDisposed) t.dispose(); }); 
+                                } 
+                            } else { hnmPredictedActions.vine = null;} 
+                        } 
+                    }
                     let totalBladeL0Anomaly = 0; let totalBladeL1Anomaly = 0; let activeBladeHnmCount = 0;
-                    blades.forEach((blade, index) => { if (!blade.isStored && blade.rigidBody && hnmBladesSystems[index] && hnmBladesSystems[index].system && !hnmBladesSystems[index].system.isDisposed) { const bladeSensoryData = getEntitySensoryData(blade, player, bciTargetWorld, "blade", blades); const bladeRuleActionForHNMInput = tf.tensor1d(ruleBasedActions.blades[index] || new Array(BLADE_RULE_ACTION_DIM).fill(0)).expandDims(0).expandDims(0); const bladeCombinedExternalInput = tf.concat([finalBciCommandTensorForHNM.clone(), bladeRuleActionForHNMInput], 2); const bladeExtInputName = hnmBladesSystems[index].system.levelConfigsOriginal[0].external_input_config?.source_signal_name; const bladeExtInputs = bladeExtInputName ? { [bladeExtInputName]: bladeCombinedExternalInput } : {}; const bladeHnmResult = runHNMStepImplModified(hnmBladesSystems[index], bladeSensoryData, bladeExtInputs); if (bladeHnmResult) { hnmPredictedActions.blades[index] = bladeHnmResult.policyActions; if (bladeHnmResult.anomalies) { totalBladeL0Anomaly += bladeHnmResult.anomalies.L0_Blade_Sensorimotor ? bladeHnmResult.anomalies.L0_Blade_Sensorimotor.dataSync()[0] : 0; totalBladeL1Anomaly += bladeHnmResult.anomalies.L1_Blade_Navigation ? bladeHnmResult.anomalies.L1_Blade_Navigation.dataSync()[0] : 0; Object.values(bladeHnmResult.anomalies).forEach(t => { if (t && !t.isDisposed) t.dispose(); }); activeBladeHnmCount++; } } else { hnmPredictedActions.blades[index] = null; } } else { hnmPredictedActions.blades[index] = null;} });
-                    if (activeBladeHnmCount > 0) { params.displayBladeAnomaliesAvg.L0 = totalBladeL0Anomaly / activeBladeHnmCount; params.displayBladeAnomaliesAvg.L1 = totalBladeL1Anomaly / activeBladeHnmCount; } else { params.displayBladeAnomaliesAvg.L0 = 0; params.displayBladeAnomaliesAvg.L1 = 0; }
+                    blades.forEach((blade, index) => { 
+                        if (!blade.isStored && blade.rigidBody && hnmBladesSystems[index] && hnmBladesSystems[index].system && !hnmBladesSystems[index].system.isDisposed) { 
+                            const bladeSensoryData = getEntitySensoryData(blade, player, bciTargetWorld, "blade", blades); 
+                            const bladeRuleActionForHNMInput = tf.tensor1d(ruleBasedActions.blades[index] || new Array(BLADE_RULE_ACTION_DIM).fill(0)).expandDims(0).expandDims(0); 
+                            const bladeCombinedExternalInput = tf.concat([finalBciCommandTensorForHNM.clone(), bladeRuleActionForHNMInput], 2); 
+                            const bladeExtInputName = hnmBladesSystems[index].system.levelConfigsOriginal[0].external_input_config?.source_signal_name; 
+                            const bladeExtInputs = bladeExtInputName ? { [bladeExtInputName]: bladeCombinedExternalInput } : {}; 
+                            const bladeHnmResult = runHNMStepImplModified(hnmBladesSystems[index], bladeSensoryData, bladeExtInputs); 
+                            if (bladeHnmResult) { 
+                                hnmPredictedActions.blades[index] = bladeHnmResult.policyActions; 
+                                if (bladeHnmResult.anomalies) { 
+                                    totalBladeL0Anomaly += bladeHnmResult.anomalies.L0_Blade_Sensorimotor ? bladeHnmResult.anomalies.L0_Blade_Sensorimotor.dataSync()[0] : 0; 
+                                    totalBladeL1Anomaly += bladeHnmResult.anomalies.L1_Blade_Navigation ? bladeHnmResult.anomalies.L1_Blade_Navigation.dataSync()[0] : 0; 
+                                    Object.values(bladeHnmResult.anomalies).forEach(t => { if (t && !t.isDisposed) t.dispose(); }); 
+                                    activeBladeHnmCount++; 
+                                } 
+                            } else { hnmPredictedActions.blades[index] = null; } 
+                        } else { hnmPredictedActions.blades[index] = null;} 
+                    });
+                    if (activeBladeHnmCount > 0) { params.displayBladeAnomaliesAvg.L0 = totalBladeL0Anomaly / activeBladeHnmCount; params.displayBladeAnomaliesAvg.L1 = totalBladeL1Anomaly / activeBladeHnmCount; } 
+                    else { params.displayBladeAnomaliesAvg.L0 = 0; params.displayBladeAnomaliesAvg.L1 = 0; }
                     finalBciCommandTensorForHNM.dispose();
                 });
                 if (params.enableHNM && (params.vineHnmLR > 0 || params.bladeHnmLR > 0)) {
@@ -1218,17 +1430,69 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             updateInfoDisplay();
         }
         function applyHNMOutputsAndDirectControlToEntities() {
-            if (gameOver && player.health <=0) return; // Stop applying if player defeated
+             // Allow entities to be controlled even if player is defeated, if the game isn't over due to all enemies defeated
+            if (gameOver && enemies.filter(e => e.health > 0).length === 0) return;
+
             let vineActionsToApply = ruleBasedActions.vine; player.vineControlledBy = "Rules (Current Intent)";
-            if (userInput.isDirectControllingVine && userInput.directControlActionActive) { vineActionsToApply = ruleBasedActions.vine; player.vineControlledBy = "DirectPlayer (BCI)";
-            } else if (params.enableHNM && hnmPredictedActions.vine) { if (Math.random() * 100 < params.hnmTakesControlChance) { vineActionsToApply = hnmPredictedActions.vine; player.vineControlledBy = `HNM (${params.hnmTakesControlChance}%)`; } else { player.vineControlledBy = `Rules (HNM Roll Fail: ${100 - params.hnmTakesControlChance}%)`; } }
-            if (vineActionsToApply && vine.segments.length > 0) { for (let i = 0; i < vine.segments.length; i++) { const seg = vine.segments[i]; const actionStartIndex = i * VINE_RULE_ACTION_DIM_PER_SEGMENT; if (vineActionsToApply.length > actionStartIndex + 2 && seg.rigidBody) { seg.rigidBody.resetForces(true); seg.rigidBody.addForce({ x: vineActionsToApply[actionStartIndex] * params.vineForceScale, y: vineActionsToApply[actionStartIndex + 1] * params.vineForceScale, z: vineActionsToApply[actionStartIndex + 2] * params.vineForceScale }, true); } } }
-            blades.forEach((blade, index) => { if (blade.isStored || !blade.rigidBody) { blade.controlledBy = "Stored"; return; } let bladeActionsToApply = ruleBasedActions.blades[index]; blade.controlledBy = "Rules (Current Intent)";
-                if (params.enableHNM && hnmPredictedActions.blades && hnmPredictedActions.blades[index]) { if (Math.random() * 100 < params.hnmTakesControlChance) { bladeActionsToApply = hnmPredictedActions.blades[index]; blade.controlledBy = `HNM (${params.hnmTakesControlChance}%)`; } else { blade.controlledBy = `Rules (HNM Roll Fail: ${100 - params.hnmTakesControlChance}%)`; } }
-                if (bladeActionsToApply && bladeActionsToApply.length === BLADE_RULE_ACTION_DIM) { blade.rigidBody.resetForces(true); blade.rigidBody.resetTorques(true); blade.rigidBody.addForce({ x: bladeActionsToApply[0] * params.bladeForceScale, y: bladeActionsToApply[1] * params.bladeForceScale, z: bladeActionsToApply[2] * params.bladeForceScale }, true); blade.rigidBody.addTorque({ x: bladeActionsToApply[3] * params.bladeTorqueScale, y: bladeActionsToApply[4] * params.bladeTorqueScale, z: bladeActionsToApply[5] * params.bladeTorqueScale }, true); } });
+            if (player.health > 0 && userInput.isDirectControllingVine && userInput.directControlActionActive) { 
+                vineActionsToApply = ruleBasedActions.vine; player.vineControlledBy = "DirectPlayer (BCI)";
+            } else if (params.enableHNM && hnmPredictedActions.vine) { 
+                if (Math.random() * 100 < params.hnmTakesControlChance) { 
+                    vineActionsToApply = hnmPredictedActions.vine; player.vineControlledBy = `HNM (${params.hnmTakesControlChance}%)`; 
+                } else { 
+                    player.vineControlledBy = `Rules (HNM Roll Fail: ${100 - params.hnmTakesControlChance}%)`; 
+                } 
+            }
+            if (vineActionsToApply && vine.segments.length > 0) { 
+                for (let i = 0; i < vine.segments.length; i++) { 
+                    const seg = vine.segments[i]; 
+                    const actionStartIndex = i * VINE_RULE_ACTION_DIM_PER_SEGMENT; 
+                    if (vineActionsToApply.length > actionStartIndex + 2 && seg.rigidBody) { 
+                        seg.rigidBody.resetForces(true); 
+                        seg.rigidBody.addForce({ 
+                            x: vineActionsToApply[actionStartIndex] * params.vineForceScale, 
+                            y: vineActionsToApply[actionStartIndex + 1] * params.vineForceScale, 
+                            z: vineActionsToApply[actionStartIndex + 2] * params.vineForceScale 
+                        }, true); 
+                    } 
+                } 
+            }
+            blades.forEach((blade, index) => { 
+                if (blade.isStored || !blade.rigidBody) { 
+                    blade.controlledBy = "Stored"; return; 
+                } 
+                let bladeActionsToApply = ruleBasedActions.blades[index]; 
+                blade.controlledBy = "Rules (Current Intent)";
+                if (params.enableHNM && hnmPredictedActions.blades && hnmPredictedActions.blades[index]) { 
+                    if (Math.random() * 100 < params.hnmTakesControlChance) { 
+                        bladeActionsToApply = hnmPredictedActions.blades[index]; 
+                        blade.controlledBy = `HNM (${params.hnmTakesControlChance}%)`; 
+                    } else { 
+                        blade.controlledBy = `Rules (HNM Roll Fail: ${100 - params.hnmTakesControlChance}%)`; 
+                    } 
+                }
+                if (bladeActionsToApply && bladeActionsToApply.length === BLADE_RULE_ACTION_DIM) { 
+                    blade.rigidBody.resetForces(true); 
+                    blade.rigidBody.resetTorques(true); 
+                    blade.rigidBody.addForce({ 
+                        x: bladeActionsToApply[0] * params.bladeForceScale, 
+                        y: bladeActionsToApply[1] * params.bladeForceScale, 
+                        z: bladeActionsToApply[2] * params.bladeForceScale 
+                    }, true); 
+                    blade.rigidBody.addTorque({ 
+                        x: bladeActionsToApply[3] * params.bladeTorqueScale, 
+                        y: bladeActionsToApply[4] * params.bladeTorqueScale, 
+                        z: bladeActionsToApply[5] * params.bladeTorqueScale 
+                    }, true); 
+                } 
+            });
         }
         function deployBlades(countToDeploy) {
-            if (!world || !player || !player.rigidBody || (gameOver && player.health <=0) ) return; if (userInput.bciCoherence < params.bciCoherenceBladeDeployThreshold && params.autoBattleInfluence < 50) { updateInfoDisplay(`Blade deploy failed: Coherence ${userInput.bciCoherence.toFixed(2)} too low (Min: ${params.bciCoherenceBladeDeployThreshold})`); return; }
+            if (!world || !player || !player.rigidBody || (gameOver && player.health <=0) ) return; 
+            if (userInput.bciCoherence < params.bciCoherenceBladeDeployThreshold && params.autoBattleInfluence < 50 && player.health > 0) { 
+                updateInfoDisplay(`Blade deploy failed: Coherence ${userInput.bciCoherence.toFixed(2)} too low (Min: ${params.bciCoherenceBladeDeployThreshold})`); 
+                return; 
+            }
             let deployedCount = 0; const playerPos = player.rigidBody.translation(); const playerRot = player.rigidBody.rotation(); const playerThreeQuat = new THREE.Quaternion(playerRot.x, playerRot.y, playerRot.z, playerRot.w);
             for (let i = 0; i < blades.length && deployedCount < countToDeploy; i++) { const blade = blades[i]; if (blade.isStored) { const angleOffset = (Math.PI * 2 / params.numBlades) * i; const spawnOffsetLocal = new THREE.Vector3( Math.cos(angleOffset) * (params.bladeOrbitRadiusBase * 0.5), 0.3, Math.sin(angleOffset) * (params.bladeOrbitRadiusBase * 0.5) ); const spawnPosThree = spawnOffsetLocal.applyQuaternion(playerThreeQuat).add(new THREE.Vector3(playerPos.x,playerPos.y,playerPos.z));
                 const bladeBodyDesc = RAPIER.RigidBodyDesc.dynamic().setTranslation(spawnPosThree.x, spawnPosThree.y, spawnPosThree.z).setCanSleep(false).setGravityScale(0.02).setLinearDamping(0.6).setAngularDamping(0.8); blade.rigidBody = world.createRigidBody(bladeBodyDesc); blade.collider = world.createCollider(RAPIER.ColliderDesc.cuboid(0.35, 0.04, 0.075).setDensity(0.2).setFriction(0.5).setRestitution(0.3), blade.rigidBody); blade.collider.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS); blade.rigidBody.userData = {entityType: "blade", entityId: blade.id};
@@ -1253,19 +1517,69 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
         function animate() {
             requestAnimationFrame(animate); const time = performance.now(); const deltaTime = Math.min(0.05, (time - lastFrameTime) / 1000.0); lastFrameTime = time;
 
-            updatePlayerPhysicsIntent();
+            updatePlayerPhysicsIntent(); // Updated to allow physics on defeated player
             updateBCIAndHNMs(deltaTime);
             applyHNMOutputsAndDirectControlToEntities();
-            updateEnemies(deltaTime);
+            updateEnemies(deltaTime); // Updated to allow enemies to continue targeting player body
 
-            if(world) { world.step(eventQueue); eventQueue.drainCollisionEvents((handle1, handle2, started) => { if (!started || (gameOver && player.health <=0 && enemies.filter(e=>e.health > 0).length > 0) ) return; // If player defeated, only process blade hits for remaining enemies. If all enemies defeated, stop all.
-                const col1 = world.getCollider(handle1); const col2 = world.getCollider(handle2); if (!col1 || !col2) return; const parentBody1 = col1.parent(); const parentBody2 = col2.parent(); const userData1 = parentBody1 ? parentBody1.userData : null; const userData2 = parentBody2 ? parentBody2.userData : null;
-                if (userData1 && userData1.entityType === "blade" && userData2 && userData2.entityType === "enemy") { const bladeBody = parentBody1; const bladeVelocity = bladeBody.linvel(); const speed = Math.sqrt(bladeVelocity.x**2 + bladeVelocity.y**2 + bladeVelocity.z**2); const damageMultiplier = Math.max(0.5, Math.min(2.5, speed / 5.0)); const finalDamage = BLADE_HIT_DAMAGE * damageMultiplier; handleEnemyDamage(userData2.entityId, finalDamage, userData1.entityId);
-                } else if (userData2 && userData2.entityType === "blade" && userData1 && userData1.entityType === "enemy") { const bladeBody = parentBody2; const bladeVelocity = bladeBody.linvel(); const speed = Math.sqrt(bladeVelocity.x**2 + bladeVelocity.y**2 + bladeVelocity.z**2); const damageMultiplier = Math.max(0.5, Math.min(2.5, speed / 5.0)); const finalDamage = BLADE_HIT_DAMAGE * damageMultiplier; handleEnemyDamage(userData1.entityId, finalDamage, userData2.entityId);
-                } else if (userData1 && userData1.entityType === "enemy" && userData2 && userData2.entityType === "player") { const enemy = enemies.find(e => e.id === userData1.entityId); if (enemy && enemy.attackCooldown <= 0) { handlePlayerDamage(enemy.damage, enemy.id); enemy.attackCooldown = 1.0 + Math.random() * 0.5; }
-                } else if (userData2 && userData2.entityType === "enemy" && userData1 && userData1.entityType === "player") { const enemy = enemies.find(e => e.id === userData2.entityId); if (enemy && enemy.attackCooldown <= 0) { handlePlayerDamage(enemy.damage, enemy.id); enemy.attackCooldown = 1.0 + Math.random() * 0.5; } } }); }
+            if(world) {
+                world.step(eventQueue);
+                eventQueue.drainCollisionEvents((handle1, handle2, started) => {
+                    if (!started) return; 
+                    
+                    const col1 = world.getCollider(handle1);
+                    const col2 = world.getCollider(handle2);
+                    if (!col1 || !col2) return;
+
+                    const parentBody1 = col1.parent();
+                    const parentBody2 = col2.parent();
+                    const userData1 = parentBody1 ? parentBody1.userData : null;
+                    const userData2 = parentBody2 ? parentBody2.userData : null;
+
+                    if (userData1 && userData1.entityType === "blade" && userData2 && userData2.entityType === "enemy") {
+                        if (!(gameOver && enemies.filter(e => e.health > 0).length === 0)) {
+                            const bladeBody = parentBody1; const bladeVelocity = bladeBody.linvel(); const speed = Math.sqrt(bladeVelocity.x**2 + bladeVelocity.y**2 + bladeVelocity.z**2);
+                            const damageMultiplier = Math.max(0.5, Math.min(2.5, speed / 5.0)); const finalDamage = BLADE_HIT_DAMAGE * damageMultiplier;
+                            handleEnemyDamage(userData2.entityId, finalDamage, userData1.entityId);
+                        }
+                    } else if (userData2 && userData2.entityType === "blade" && userData1 && userData1.entityType === "enemy") {
+                         if (!(gameOver && enemies.filter(e => e.health > 0).length === 0)) {
+                            const bladeBody = parentBody2; const bladeVelocity = bladeBody.linvel(); const speed = Math.sqrt(bladeVelocity.x**2 + bladeVelocity.y**2 + bladeVelocity.z**2);
+                            const damageMultiplier = Math.max(0.5, Math.min(2.5, speed / 5.0)); const finalDamage = BLADE_HIT_DAMAGE * damageMultiplier;
+                            handleEnemyDamage(userData1.entityId, finalDamage, userData2.entityId);
+                        }
+                    } 
+                    else if (userData1 && userData1.entityType === "enemy" && userData2 && userData2.entityType === "player") {
+                        if (player.health > 0) { // Only apply damage if player is alive
+                            const enemy = enemies.find(e => e.id === userData1.entityId);
+                            if (enemy && enemy.attackCooldown <= 0) {
+                                handlePlayerDamage(enemy.damage, enemy.id);
+                                enemy.attackCooldown = 1.0 + Math.random() * 0.5;
+                            }
+                        }
+                    } else if (userData2 && userData2.entityType === "enemy" && userData1 && userData1.entityType === "player") {
+                        if (player.health > 0) { // Only apply damage if player is alive
+                            const enemy = enemies.find(e => e.id === userData2.entityId);
+                            if (enemy && enemy.attackCooldown <= 0) {
+                                handlePlayerDamage(enemy.damage, enemy.id);
+                                enemy.attackCooldown = 1.0 + Math.random() * 0.5;
+                            }
+                        }
+                    }
+                });
+            }
             if (player?.mesh && player.rigidBody) { const playerPhysicsPos = player.rigidBody.translation(); player.mesh.position.set(playerPhysicsPos.x, playerPhysicsPos.y, playerPhysicsPos.z);
-                const camLookAtOffset = new THREE.Vector3(0, 0.8, 0); const camLookAtTarget = new THREE.Vector3(playerPhysicsPos.x, playerPhysicsPos.y, playerPhysicsPos.z).add(camLookAtOffset); const camDist = 5.5; const camOffsetX = camDist * Math.sin(userInput.cameraYaw) * Math.cos(userInput.cameraPitch); const camOffsetY = camDist * Math.sin(userInput.cameraPitch); const camOffsetZ = camDist * Math.cos(userInput.cameraYaw) * Math.cos(userInput.cameraPitch); camera.position.set(camLookAtTarget.x - camOffsetX, camLookAtTarget.y + camOffsetY, camLookAtTarget.z - camOffsetZ); camera.lookAt(camLookAtTarget);
+                 // Only update camera and player mesh rotation if player is alive.
+                if (player.health > 0) {
+                    const camLookAtOffset = new THREE.Vector3(0, 0.8, 0); 
+                    const camLookAtTarget = new THREE.Vector3(playerPhysicsPos.x, playerPhysicsPos.y, playerPhysicsPos.z).add(camLookAtOffset); 
+                    const camDist = 5.5; 
+                    const camOffsetX = camDist * Math.sin(userInput.cameraYaw) * Math.cos(userInput.cameraPitch); 
+                    const camOffsetY = camDist * Math.sin(userInput.cameraPitch); 
+                    const camOffsetZ = camDist * Math.cos(userInput.cameraYaw) * Math.cos(userInput.cameraPitch); 
+                    camera.position.set(camLookAtTarget.x - camOffsetX, camLookAtTarget.y + camOffsetY, camLookAtTarget.z - camOffsetZ); 
+                    camera.lookAt(camLookAtTarget);
+                } // Player mesh rotation is handled in updatePlayerPhysicsIntent only when alive.
             }
             vine?.segments.forEach(s => { if(s.mesh && s.rigidBody){const p=s.rigidBody.translation(); const q=s.rigidBody.rotation(); s.mesh.position.set(p.x,p.y,p.z); s.mesh.quaternion.set(q.x,q.y,q.z,q.w);}});
             blades.forEach(b => { if(!b.isStored && b.mesh && b.rigidBody){const p=b.rigidBody.translation(); const q=b.rigidBody.rotation(); b.mesh.position.set(p.x,p.y,p.z); b.mesh.quaternion.set(q.x,q.y,q.z,q.w);}});
@@ -1278,4 +1592,5 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
     </script>
 </body>
 </html>
+
 
