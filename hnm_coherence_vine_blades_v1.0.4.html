@@ -294,9 +294,9 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
         const userInput = { mouseX: 0, mouseY: 0, click: false, moveForward: 0, moveBackward: 0, moveLeft: 0, moveRight: 0, jump: false, bciCommandTarget: new THREE.Vector3(), bciCommandTargetScreen: new THREE.Vector2(), bciCommandTargetLastScreen: new THREE.Vector2(), bciCoherence: 0.0, bciAction: false, cameraYaw: Math.PI, cameraPitch: 0.25, isPointerLocked: false, isBCIModeActive: false, isBCITouchAiming: false, bciTouchStart: {x:0, y:0}, bciTouchCurrent: {x:0, y:0}, isDirectControllingVine: false, directControlActionActive: false };
         const params = {
             gravity: -15.0, playerSpeed: 8.0, playerJumpForce: 9.0,
-            vineSegmentLength: 0.2, vineSegmentRadius: 0.2, numVineSegments: 20,
+            vineSegmentLength: 1.0, vineSegmentRadius: 0.2, numVineSegments: 20,
             vineForceScale: 5.0, vineDamping: 0.1, vineArmorSpringK: 5.0, vineArmorDampingK: 0.1,
-            bladeForceScale: 5.0, bladeTorqueScale: 0.1, numBlades: 10, bladeOrbitRadiusBase: 2.0, bladeOrbitSpeed: 2.0,
+            bladeForceScale: 5.0, bladeTorqueScale: 0.1, numBlades: 10, bladeOrbitRadiusBase: 3.0, bladeOrbitSpeed: 2.0,
             bladeReEngageSpeedThreshold: 2.0, bladeReEngageBackupDist: 5.0,
             showRapierDebug: true, enableHNM: false,
             resetSimulation: () => initDemo(true),
@@ -306,7 +306,7 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             bciCoherenceBladeDeployThreshold: 0.35, bciCoherenceMinActionThreshold: 0.25,
             deployOneBlade: () => deployBlades(1), recallAllBlades: () => recallAllBladesFunction(),
             toggleDirectVineControl: () => { userInput.isDirectControllingVine = !userInput.isDirectControllingVine; updateInfoDisplay();},
-            numEnemies: 50, autoBattleInfluence: 100, // New parameter
+            numEnemies: 100, autoBattleInfluence: 100,
             hnmTakesControlChance: 0,
             displayVineAnomalies: { L0: 0, L1: 0 }, displayBladeAnomaliesAvg: { L0: 0, L1: 0 },
         };
@@ -442,7 +442,15 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             } updateHealthUIDisplay();
         }
         function updateEnemies(deltaTime) {
-            if (gameOver) return; const time = performance.now() * 0.001;
+            if (gameOver) {
+                enemies.forEach(enemy => {
+                    if (enemy.rigidBody) {
+                        enemy.rigidBody.setLinvel({x:0, y: enemy.isFlying ? 0 : enemy.rigidBody.linvel().y, z:0}, true);
+                    }
+                });
+                return;
+            }
+            const time = performance.now() * 0.001;
             enemies.forEach(enemy => { if (enemy.health <= 0 || !enemy.rigidBody || !player || !player.rigidBody) return; const enemyPos = enemy.rigidBody.translation(); const playerPosVec = player.rigidBody.translation();
                 if (enemy.isFlying) { const targetFlyHeight = playerPosVec.y + 2.0 + Math.sin(time * 0.3 + enemy.id.hashCode() * 0.1) * 1.5; const directionToPlayer3D = new THREE.Vector3(playerPosVec.x - enemyPos.x, targetFlyHeight - enemyPos.y, playerPosVec.z - enemyPos.z); if (directionToPlayer3D.lengthSq() > 0.1) { directionToPlayer3D.normalize(); const enemySpeed = 2.0 + enemy.level * 0.25; enemy.rigidBody.setLinvel({ x: directionToPlayer3D.x * enemySpeed, y: directionToPlayer3D.y * enemySpeed, z: directionToPlayer3D.z * enemySpeed }, true); }
                 } else { const directionToPlayer = new THREE.Vector3(playerPosVec.x - enemyPos.x, 0, playerPosVec.z - enemyPos.z); if (directionToPlayer.lengthSq() > 0.1) { directionToPlayer.normalize(); const enemySpeed = 3.0 + enemy.level * 0.5; enemy.rigidBody.setLinvel({ x: directionToPlayer.x * enemySpeed, y: enemy.rigidBody.linvel().y, z: directionToPlayer.z * enemySpeed }, true); } }
@@ -489,7 +497,12 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             }
         }
         function updatePlayerPhysicsIntent() {
-            if (!player || !player.rigidBody || gameOver) return;
+            if (!player || !player.rigidBody) return;
+            if (gameOver) {
+                player.rigidBody.setLinvel({x:0, y:player.rigidBody.linvel().y, z:0}, true); // Stop horizontal movement
+                return;
+            }
+
             const playerPhysicsPos = player.rigidBody.translation(); const playerPhysicsLinvel = player.rigidBody.linvel(); player.rigidBody.resetForces(true);
             let finalMoveDirection = new THREE.Vector3(); let yVel = playerPhysicsLinvel.y;
             const playerMoveDirection = new THREE.Vector3(); const playerFlatForward = new THREE.Vector3(Math.sin(userInput.cameraYaw), 0, Math.cos(userInput.cameraYaw)).normalize(); const playerRight = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), playerFlatForward).normalize();
@@ -538,13 +551,42 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             const bladePosVec = bladeInstance.rigidBody.translation(); const bladePos = new THREE.Vector3(bladePosVec.x, bladePosVec.y, bladePosVec.z); const playerPosVec = playerInstance.rigidBody.translation(); const playerPos = new THREE.Vector3(playerPosVec.x, playerPosVec.y, playerPosVec.z); const bladeVelVec = bladeInstance.rigidBody.linvel(); const bladeSpeed = Math.sqrt(bladeVelVec.x ** 2 + bladeVelVec.y ** 2 + bladeVelVec.z ** 2);
             const isAttackIntent = currentBciCoherence > params.bciCoherenceMinActionThreshold && isBciActionActive; let forceMagnitudeFactor = 0.6; let torqueMagnitudeFactor = 0.4; let effectiveTarget = currentBciTargetWorld.clone();
             if (!bladeInstance.state) bladeInstance.state = { timeSinceLastBackup: 0, stuckTimer: 0, isAggressivePursuit: false, aggressivePursuitTimer: 0 }; bladeInstance.state.timeSinceLastBackup += deltaTime;
-            if (params.autoBattleInfluence > 50 && isAttackIntent && enemies.length > 0) { // Use autoBattleInfluence to check if auto-battle is dominant
-                let targetEnemyForLead = null; let minDistToBCITargetSq = Infinity;
+            if (params.autoBattleInfluence > 50 && isAttackIntent && enemies.length > 0) { let targetEnemyForLead = null; let minDistToBCITargetSq = Infinity;
                 enemies.forEach(e => { if (e.rigidBody && e.health > 0) { const enemyP = e.rigidBody.translation(); const distSq = currentBciTargetWorld.distanceToSquared(new THREE.Vector3(enemyP.x, enemyP.y, enemyP.z)); if (distSq < minDistToBCITargetSq) { minDistToBCITargetSq = distSq; targetEnemyForLead = e; } } });
                 if (targetEnemyForLead && targetEnemyForLead.rigidBody && minDistToBCITargetSq < (params.bciTargetDistance * params.bciTargetDistance) ) { const enemyCurrentPos = targetEnemyForLead.rigidBody.translation(); const enemyVel = targetEnemyForLead.rigidBody.linvel(); const leadTime = 0.18; effectiveTarget.set( enemyCurrentPos.x + enemyVel.x * leadTime, enemyCurrentPos.y + enemyVel.y * leadTime, enemyCurrentPos.z + enemyVel.z * leadTime ); if (targetEnemyForLead.isFlying) { effectiveTarget.y = Math.max(0.5, Math.min(enemyCurrentPos.y, playerPos.y + 3.0)); } else { effectiveTarget.y = enemyCurrentPos.y; } }
             }
             if (bladeInstance.state.isAggressivePursuit) { bladeInstance.state.aggressivePursuitTimer -= deltaTime; if (bladeInstance.state.aggressivePursuitTimer <= 0) { bladeInstance.state.isAggressivePursuit = false; } forceMagnitudeFactor = 1.0; torqueMagnitudeFactor = 0.8;
-            } else if (isAttackIntent) { const distToEffectiveTarget = bladePos.distanceTo(effectiveTarget); let shouldBackup = false; if (distToEffectiveTarget < params.bladeReEngageBackupDist * 0.5 && bladeSpeed < params.bladeReEngageSpeedThreshold && bladeInstance.state.timeSinceLastBackup > 1.0) { shouldBackup = true; } if (distToEffectiveTarget < params.bladeReEngageBackupDist * 0.25 && bladeSpeed < params.bladeReEngageSpeedThreshold * 0.5) { bladeInstance.state.stuckTimer = (bladeInstance.state.stuckTimer || 0) + deltaTime; if (bladeInstance.state.stuckTimer > 0.5) shouldBackup = true; } else { bladeInstance.state.stuckTimer = 0; } if (bladeInstance.state.stuckTimer > 1.5 && !bladeInstance.state.isAggressivePursuit) { bladeInstance.state.isAggressivePursuit = true; bladeInstance.state.aggressivePursuitTimer = 2.0; bladeInstance.state.stuckTimer = 0; }
+            } else if (isAttackIntent) { // This is the block where the error occurred
+                const distToEffectiveTarget = bladePos.distanceTo(effectiveTarget); // <<< Calculate distToEffectiveTarget HERE
+                let shouldBackup = false;
+                const isStrongAIControl = params.autoBattleInfluence > 80;
+                
+                if (distToEffectiveTarget < params.bladeReEngageBackupDist * 0.5 && bladeSpeed < params.bladeReEngageSpeedThreshold && bladeInstance.state.timeSinceLastBackup > (isStrongAIControl ? 2.0 : 1.0) ) { // Now distToEffectiveTarget is defined
+                    shouldBackup = true;
+                }
+                if (distToEffectiveTarget < params.bladeReEngageBackupDist * 0.25 && bladeSpeed < params.bladeReEngageSpeedThreshold * 0.5) {
+                    bladeInstance.state.stuckTimer = (bladeInstance.state.stuckTimer || 0) + deltaTime;
+                    if (bladeInstance.state.stuckTimer > (isStrongAIControl ? 1.0 : 0.5)) {
+                         shouldBackup = true;
+                    }
+                } else {
+                    bladeInstance.state.stuckTimer = 0;
+                }
+
+                if (isStrongAIControl && shouldBackup) {
+                     if (distToEffectiveTarget > params.bladeReEngageBackupDist * 0.1) {
+                        // AI will still backup if truly stuck, but not as readily
+                     } else {
+                        shouldBackup = false; // AI is very close, don't backup, keep trying
+                     }
+                }
+
+                if (bladeInstance.state.stuckTimer > (isStrongAIControl ? 2.5 : 1.5) && !bladeInstance.state.isAggressivePursuit) {
+                    bladeInstance.state.isAggressivePursuit = true;
+                    bladeInstance.state.aggressivePursuitTimer = 2.0;
+                    bladeInstance.state.stuckTimer = 0;
+                }
+
                 if (shouldBackup && !bladeInstance.state.isAggressivePursuit) { bladeInstance.state.timeSinceLastBackup = 0; bladeInstance.state.stuckTimer = 0; const playerToTargetDir = new THREE.Vector3().subVectors(effectiveTarget, playerPos).normalize(); const perpendicularOffset = new THREE.Vector3(-playerToTargetDir.z, 0, playerToTargetDir.x).multiplyScalar(params.bladeReEngageBackupDist * 0.3); const idealBackupPos = playerPos.clone().addScaledVector(playerToTargetDir, -params.bladeReEngageBackupDist * 0.7).add(perpendicularOffset); const backupDir = new THREE.Vector3().subVectors(idealBackupPos, bladePos).normalize(); const backupTarget = bladePos.clone().addScaledVector(backupDir, params.bladeReEngageBackupDist); effectiveTarget.copy(backupTarget); forceMagnitudeFactor = 0.7; torqueMagnitudeFactor = 0.2;
                 } else if (!bladeInstance.state.isAggressivePursuit) { forceMagnitudeFactor = 0.85; torqueMagnitudeFactor = 0.6; bladeInstance.state.stuckTimer = 0; }
             } else { bladeInstance.state.stuckTimer = 0; bladeInstance.state.isAggressivePursuit = false; const bladeIndex = blades.findIndex(b => b.id === bladeInstance.id); const activeBladesCount = Math.max(1, blades.filter(b => !b.isStored).length); const angleOffset = (bladeIndex * Math.PI * 2 / activeBladesCount) + performance.now() * 0.001 * params.bladeOrbitSpeed; const orbitRadius = params.bladeOrbitRadiusBase + (bladeIndex % 3) * 0.7; const orbitHeightVariation = (bladeIndex % 2 === 0) ? 0.3 : -0.2; effectiveTarget.set( playerPos.x + Math.cos(angleOffset) * orbitRadius, playerPos.y + 0.8 + orbitHeightVariation, playerPos.z + Math.sin(angleOffset) * orbitRadius ); forceMagnitudeFactor = 0.5; torqueMagnitudeFactor = 0.3; }
@@ -575,7 +617,14 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             window.disposeHnsResultsTensors(hnmStepResult); return { policyActions: policyOutputActionsArray, anomalies: anomaliesToReturn };
         }
         function updateBCIAndHNMs(deltaTime) {
-            if (!player || !player.rigidBody || gameOver) return; const playerPosVec = player.rigidBody.translation(); const playerPos = new THREE.Vector3(playerPosVec.x, playerPosVec.y, playerPosVec.z);
+            if (!player || !player.rigidBody) return;
+             if (gameOver) { // If game is over, don't update BCI/HNM logic that might cause movement
+                userInput.bciCoherence = Math.max(0.0, userInput.bciCoherence - params.bciCoherenceDecayRate * deltaTime * 60); // Let coherence decay
+                userInput.bciAction = false; // Ensure action is off
+                if (bciTargetWorldIndicatorMesh) bciTargetWorldIndicatorMesh.style.display = 'none';
+                return;
+            }
+            const playerPosVec = player.rigidBody.translation(); const playerPos = new THREE.Vector3(playerPosVec.x, playerPosVec.y, playerPosVec.z);
             let playerRawBciTargetScreen = new THREE.Vector2(0,0); let playerIsActivelyBciAiming = false; let playerWantsBciActionThisFrame = false;
             if (userInput.isBCITouchAiming) { playerRawBciTargetScreen.copy(userInput.bciCommandTargetScreen); playerIsActivelyBciAiming = true; playerWantsBciActionThisFrame = userInput.bciAction; } else if (userInput.isBCIModeActive) { playerRawBciTargetScreen.copy(userInput.bciCommandTargetScreen); playerIsActivelyBciAiming = true; playerWantsBciActionThisFrame = userInput.bciAction; }
             const playerAimMovementDelta = playerRawBciTargetScreen.distanceTo(userInput.bciCommandTargetLastScreen); let tempPlayerCoherence = userInput.bciCoherence;
@@ -586,7 +635,9 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             let autoBattleBciTargetWorld = new THREE.Vector3().copy(finalPlayerBciTargetWorld); let autoBattleCoherence = 0.0; let autoBattleWantsBciAction = false;
             if (params.autoBattleInfluence > 0) { player.autoBattleTargetVelocity.set(0,0,0); player.autoBattleFaceEnemy = false;
                 if (enemies.length > 0) { let closestEnemy = null; let minDistanceSq = Infinity; enemies.forEach(enemy => { if (enemy.rigidBody && enemy.health > 0) { const enemyP = enemy.rigidBody.translation(); const distSq = playerPos.distanceToSquared(new THREE.Vector3(enemyP.x, enemyP.y, enemyP.z)); if (distSq < minDistanceSq) { minDistanceSq = distSq; closestEnemy = enemy; } } });
-                    if (closestEnemy && closestEnemy.rigidBody) { const enemyPosVec = closestEnemy.rigidBody.translation(); const enemyPosTHREE = new THREE.Vector3(enemyPosVec.x, enemyPosVec.y, enemyPosVec.z); autoBattleBciTargetWorld.copy(enemyPosTHREE); player.autoBattleFaceEnemy = true; player.autoBattleTargetEnemyPos.copy(enemyPosTHREE); const distanceToEnemy = Math.sqrt(minDistanceSq); const desiredDistance = params.bladeOrbitRadiusBase * 1.8; const directionToEnemyWorld = new THREE.Vector3().subVectors(enemyPosTHREE, playerPos); if (!closestEnemy.isFlying) directionToEnemyWorld.y = 0; if(directionToEnemyWorld.lengthSq() > 0.01) directionToEnemyWorld.normalize(); if (distanceToEnemy > desiredDistance + 0.5) player.autoBattleTargetVelocity.copy(directionToEnemyWorld).multiplyScalar(params.playerSpeed); else if (distanceToEnemy < desiredDistance - 0.5) player.autoBattleTargetVelocity.copy(directionToEnemyWorld).multiplyScalar(-params.playerSpeed); if (!closestEnemy.isFlying && Math.random() < 0.015 && player.isOnGround) userInput.jump = true; autoBattleCoherence = 0.85; if (distanceToEnemy < params.bciTargetDistance * 0.95) { const activeBladesCount = blades.filter(b => !b.isStored).length; if (activeBladesCount < params.numBlades && Math.random() < 0.08 * (params.autoBattleInfluence/100)) deployBlades(1); autoBattleWantsBciAction = true; }
+                    if (closestEnemy && closestEnemy.rigidBody) { const enemyPosVec = closestEnemy.rigidBody.translation(); const enemyPosTHREE = new THREE.Vector3(enemyPosVec.x, enemyPosVec.y, enemyPosVec.z); autoBattleBciTargetWorld.copy(enemyPosTHREE); player.autoBattleFaceEnemy = true; player.autoBattleTargetEnemyPos.copy(enemyPosTHREE); const distanceToEnemy = Math.sqrt(minDistanceSq); const desiredDistance = params.bladeOrbitRadiusBase * 1.8; const directionToEnemyWorld = new THREE.Vector3().subVectors(enemyPosTHREE, playerPos); if (!closestEnemy.isFlying) directionToEnemyWorld.y = 0; if(directionToEnemyWorld.lengthSq() > 0.01) directionToEnemyWorld.normalize(); if (distanceToEnemy > desiredDistance + 0.5) player.autoBattleTargetVelocity.copy(directionToEnemyWorld).multiplyScalar(params.playerSpeed); else if (distanceToEnemy < desiredDistance - 0.5) player.autoBattleTargetVelocity.copy(directionToEnemyWorld).multiplyScalar(-params.playerSpeed); if (!closestEnemy.isFlying && Math.random() < 0.015 && player.isOnGround) userInput.jump = true; autoBattleCoherence = 0.85;
+                         autoBattleWantsBciAction = true; // AI wants to act if it has a target
+                         if (distanceToEnemy < params.bciTargetDistance * 0.95) { const activeBladesCount = blades.filter(b => !b.isStored).length; if (activeBladesCount < params.numBlades && Math.random() < 0.08 * (params.autoBattleInfluence/100)) deployBlades(1); }
                     } else { autoBattleCoherence = 0.1; } } else { autoBattleCoherence = 0.05; } }
             const abInfluenceRatio = params.autoBattleInfluence / 100.0; bciTargetWorld.lerpVectors(finalPlayerBciTargetWorld, autoBattleBciTargetWorld, abInfluenceRatio); userInput.bciCoherence = THREE.MathUtils.lerp(finalPlayerCoherence, autoBattleCoherence, abInfluenceRatio);
             const playerActionProbability = finalPlayerWantsBciAction ? (1.0 - abInfluenceRatio) : 0.0; const autoBattleActionProbability = autoBattleWantsBciAction ? abInfluenceRatio : 0.0;
@@ -603,7 +654,6 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
                     if (activeBladeHnmCount > 0) { params.displayBladeAnomaliesAvg.L0 = totalBladeL0Anomaly / activeBladeHnmCount; params.displayBladeAnomaliesAvg.L1 = totalBladeL1Anomaly / activeBladeHnmCount; } else { params.displayBladeAnomaliesAvg.L0 = 0; params.displayBladeAnomaliesAvg.L1 = 0; }
                     finalBciCommandTensorForHNM.dispose();
                 });
-                // Policy Head Training
                 if (params.enableHNM && (params.vineHnmLR > 0 || params.bladeHnmLR > 0)) {
                     tf.tidy(() => {
                         if (hnmVine && hnmVine.policyHead && ruleBasedActions.vine && hnmVine.lastStepOutputs) { const vineTeacherActionsTensor = tf.tensor1d(ruleBasedActions.vine); const vinePolicyInputState = hnmVine.lastStepOutputs[hnmVine.policyHeadInputLevelName]?.retrievedVal; if (vinePolicyInputState && !vinePolicyInputState.isDisposed) { const vinePolicyOptimizer = tf.train.adam(params.vineHnmLR); const lossFunction = () => { const policyPrediction = hnmVine.policyHead.apply(vinePolicyInputState.reshape([1, -1])); return tf.losses.meanSquaredError(vineTeacherActionsTensor.reshape([1, -1]), policyPrediction); }; const trainableVars = hnmVine.policyHead.trainableWeights.map(w => w.val); if (trainableVars.length > 0) { const { grads, value } = vinePolicyOptimizer.computeGradients(lossFunction, trainableVars); if (grads) { const clippedGrads = {}; let globalNormVal = 0; for (const varName in grads) { if (grads[varName]) { globalNormVal += tf.norm(grads[varName]).square().dataSync()[0]; } } globalNormVal = Math.sqrt(globalNormVal); const clipNorm = 1.0; const clipRatio = globalNormVal > clipNorm ? clipNorm / (globalNormVal + 1e-6) : 1.0; for (const varName in grads) { if (grads[varName]) { clippedGrads[varName] = grads[varName].mul(tf.scalar(clipRatio)); } } vinePolicyOptimizer.applyGradients(clippedGrads); Object.values(grads).forEach(grad => { if(grad) grad.dispose(); }); Object.values(clippedGrads).forEach(grad => { if(grad) grad.dispose(); }); } if (value) value.dispose(); } vinePolicyOptimizer.dispose(); } if (vineTeacherActionsTensor) vineTeacherActionsTensor.dispose(); }
@@ -614,7 +664,8 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
             updateInfoDisplay();
         }
         function applyHNMOutputsAndDirectControlToEntities() {
-            if (gameOver) return; let vineActionsToApply = ruleBasedActions.vine; player.vineControlledBy = "Rules (Current Intent)";
+            if (gameOver) return;
+            let vineActionsToApply = ruleBasedActions.vine; player.vineControlledBy = "Rules (Current Intent)";
             if (userInput.isDirectControllingVine && userInput.directControlActionActive) { vineActionsToApply = ruleBasedActions.vine; player.vineControlledBy = "DirectPlayer (BCI)";
             } else if (params.enableHNM && hnmPredictedActions.vine) { if (Math.random() * 100 < params.hnmTakesControlChance) { vineActionsToApply = hnmPredictedActions.vine; player.vineControlledBy = `HNM (${params.hnmTakesControlChance}%)`; } else { player.vineControlledBy = `Rules (HNM Roll Fail: ${100 - params.hnmTakesControlChance}%)`; } }
             if (vineActionsToApply && vine.segments.length > 0) { for (let i = 0; i < vine.segments.length; i++) { const seg = vine.segments[i]; const actionStartIndex = i * VINE_RULE_ACTION_DIM_PER_SEGMENT; if (vineActionsToApply.length > actionStartIndex + 2 && seg.rigidBody) { seg.rigidBody.resetForces(true); seg.rigidBody.addForce({ x: vineActionsToApply[actionStartIndex] * params.vineForceScale, y: vineActionsToApply[actionStartIndex + 1] * params.vineForceScale, z: vineActionsToApply[actionStartIndex + 2] * params.vineForceScale }, true); } } }
@@ -647,7 +698,12 @@ console.log("[HNM Core] Version 1.0.0 Loaded. Classes attached to window object.
         let lastFrameTime = performance.now();
         function animate() {
             requestAnimationFrame(animate); const time = performance.now(); const deltaTime = Math.min(0.05, (time - lastFrameTime) / 1000.0); lastFrameTime = time;
-            if (!gameOver) { updatePlayerPhysicsIntent(); updateBCIAndHNMs(deltaTime); applyHNMOutputsAndDirectControlToEntities(); updateEnemies(deltaTime); }
+            // Moved gameOver check to be inside the functions that would be affected by it
+            updatePlayerPhysicsIntent(); // Now has internal gameOver check
+            updateBCIAndHNMs(deltaTime); // Now has internal gameOver check
+            applyHNMOutputsAndDirectControlToEntities(); // Now has internal gameOver check
+            updateEnemies(deltaTime); // Now has internal gameOver check
+
             if(world) { world.step(eventQueue); eventQueue.drainCollisionEvents((handle1, handle2, started) => { if (!started || gameOver) return; const col1 = world.getCollider(handle1); const col2 = world.getCollider(handle2); if (!col1 || !col2) return; const parentBody1 = col1.parent(); const parentBody2 = col2.parent(); const userData1 = parentBody1 ? parentBody1.userData : null; const userData2 = parentBody2 ? parentBody2.userData : null;
                 if (userData1 && userData1.entityType === "blade" && userData2 && userData2.entityType === "enemy") { const bladeBody = parentBody1; const bladeVelocity = bladeBody.linvel(); const speed = Math.sqrt(bladeVelocity.x**2 + bladeVelocity.y**2 + bladeVelocity.z**2); const damageMultiplier = Math.max(0.5, Math.min(2.5, speed / 5.0)); const finalDamage = BLADE_HIT_DAMAGE * damageMultiplier; handleEnemyDamage(userData2.entityId, finalDamage, userData1.entityId);
                 } else if (userData2 && userData2.entityType === "blade" && userData1 && userData1.entityType === "enemy") { const bladeBody = parentBody2; const bladeVelocity = bladeBody.linvel(); const speed = Math.sqrt(bladeVelocity.x**2 + bladeVelocity.y**2 + bladeVelocity.z**2); const damageMultiplier = Math.max(0.5, Math.min(2.5, speed / 5.0)); const finalDamage = BLADE_HIT_DAMAGE * damageMultiplier; handleEnemyDamage(userData1.entityId, finalDamage, userData2.entityId);
