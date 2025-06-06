@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>VR Gamepad Physics Demo - Corrected Head Movement</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; color: white; }
+        canvas { display: block; }
+        #info {
+            position: absolute;
+            top: 10px;
+            width: 100%;
+            text-align: center;
+            color: white;
+            z-index: 100;
+            font-family: monospace;
+        }
+        #debug-info {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: lightgreen;
+            background-color: rgba(0,0,0,0.6);
+            padding: 10px;
+            font-family: monospace;
+            font-size: 11px;
+            z-index: 101;
+            max-height: 200px;
+            overflow-y: auto;
+            width: calc(100% - 40px);
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        VR Gamepad Physics Demo - Corrected Head Movement<br/>
+        Left Stick: Move. Right Stick: Turn Body. Device Accelerometer: Head Movement.
+    </div>
+    <div id="debug-info">Awaiting XR session...</div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/",
+                "rapier3d-compat": "https://cdn.skypack.dev/@dimforge/rapier3d-compat"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { VRButton } from 'three/addons/webxr/VRButton.js';
+        import RAPIER from 'rapier3d-compat';
+
+        let camera, scene, renderer;
+        let world; 
+        let xrRig, headContainer; 
+        
+        let playerBodyRB;    
+
+        let debugInfoElement;
+        const moveSpeed = 2.0; 
+        const rotationSpeed = Math.PI / 2; 
+        const playerHeight = 1.6; 
+        const playerRadius = 0.3; 
+        const clock = new THREE.Clock();
+
+        let activeGamepad = null;
+        let gamepadSourceType = "";
+        let xrSession = null; 
+
+        const tempVector3 = new THREE.Vector3();
+        const tempQuaternion = new THREE.Quaternion();
+
+        const headControl = {
+            impulseScale: 1.5, // How strongly each accelerometer reading "pushes" the head.
+            decaySpeed: 4.0,   // How quickly the head returns to center (like neck muscles).
+            maxOffset: 0.25,   // The maximum distance the head can be from the center.
+            _impulse: new THREE.Vector3(),
+            _currentOffset: new THREE.Vector3()
+        };
+
+
+        async function main() {
+            await RAPIER.init();
+            initGraphicsAndXR();
+            initAccelerometer();
+            initPhysics();
+            initPlayer();
+            renderer.setAnimationLoop(animate);
+        }
+
+        function initGraphicsAndXR() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x112233);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            xrRig = new THREE.Group();
+            headContainer = new THREE.Group(); 
+            xrRig.add(headContainer);
+            headContainer.add(camera);
+            scene.add(xrRig);  
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;
+            document.body.appendChild(renderer.domElement);
+            
+            const vrButton = VRButton.createButton(renderer);
+            vrButton.id = 'VRButton';
+            document.body.appendChild(vrButton);
+
+            debugInfoElement = document.getElementById('debug-info');
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(1, 2, 1.5).normalize();
+            scene.add(directionalLight);
+            const gridHelper = new THREE.GridHelper(50, 50, 0x555555, 0x888888);
+            scene.add(gridHelper);
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        
+        function initAccelerometer() {
+            const vrButton = document.getElementById('VRButton');
+            if (vrButton && typeof(DeviceMotionEvent) !== "undefined" && typeof(DeviceMotionEvent.requestPermission) === "function") {
+                vrButton.addEventListener('click', () => {
+                    DeviceMotionEvent.requestPermission().then(permissionState => {
+                        if (permissionState === 'granted') {
+                            window.addEventListener('devicemotion', handleDeviceMotion, true);
+                        }
+                    }).catch(console.error);
+                });
+            } else if (window.DeviceMotionEvent) {
+                window.addEventListener('devicemotion', handleDeviceMotion, true);
+            }
+        }
+
+        function handleDeviceMotion(event) {
+            if (event.acceleration) {
+                // Store the latest acceleration reading as an "impulse".
+                headControl._impulse.set(
+                   -event.acceleration.y,
+                   -event.acceleration.x,
+                    event.acceleration.z 
+                );
+            }
+        }
+        
+        function updateHeadMovement(deltaTime) {
+            // 1. Apply the latest accelerometer impulse to the current offset.
+            // This "pushes" the head. We scale it by deltaTime to make it frame-rate independent.
+            const scaledImpulse = tempVector3.copy(headControl._impulse).multiplyScalar(deltaTime * headControl.impulseScale);
+            headControl._currentOffset.add(scaledImpulse);
+            
+            // 2. Clamp the offset to the maximum allowed distance.
+            if (headControl._currentOffset.length() > headControl.maxOffset) {
+                headControl._currentOffset.normalize().multiplyScalar(headControl.maxOffset);
+            }
+            
+            // 3. Apply a decay to the offset, smoothly pulling it back to center.
+            // This simulates neck muscles and prevents oscillation.
+            headControl._currentOffset.lerp(tempVector3.set(0,0,0), deltaTime * headControl.decaySpeed);
+
+            // 4. Apply the final calculated offset to the head's container.
+            headContainer.position.copy(headControl._currentOffset);
+
+            // 5. Reset the impulse so it's only applied once per reading.
+            headControl._impulse.set(0, 0, 0);
+        }
+
+        function initPhysics() {
+            let gravity = { x: 0.0, y: -9.81, z: 0.0 };
+            world = new RAPIER.World(gravity);
+            let groundColliderDesc = RAPIER.ColliderDesc.cuboid(50.0, 0.1, 50.0)
+                .setTranslation(0, -0.1, 0) 
+                .setFriction(1.0);
+            world.createCollider(groundColliderDesc);
+        }
+
+        function initPlayer() {
+            const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
+                .setTranslation(0, playerHeight / 2, 0) 
+                .setCanSleep(false)
+                .setLinearDamping(2.5) 
+                .setAngularDamping(10.0) 
+                .enabledRotations(false, true, false); 
+            playerBodyRB = world.createRigidBody(bodyDesc);
+
+            const torsoHeight = playerHeight * 0.75;
+            const torsoRadius = playerRadius;
+            const torsoGeom = new THREE.CapsuleGeometry(torsoRadius, torsoHeight - (2 * torsoRadius), 8, 16);
+            const bodyMat = new THREE.MeshStandardMaterial({ color: 0x00dd00, roughness: 0.8, wireframe: true });
+            const torsoMesh = new THREE.Mesh(torsoGeom, bodyMat);
+            torsoMesh.position.y = torsoHeight / 2;
+            xrRig.add(torsoMesh);
+
+            const headGeom = new THREE.SphereGeometry(playerRadius * 0.5, 16, 12);
+            const headMat = new THREE.MeshStandardMaterial({ color: 0x00ff00, roughness: 0.7, wireframe: true });
+            const headMesh = new THREE.Mesh(headGeom, headMat);
+            headMesh.position.y = playerHeight * 0.9;
+            xrRig.add(headMesh);
+            
+            const capsuleHalfHeight = (playerHeight / 2) - playerRadius;
+            const playerColliderDesc = RAPIER.ColliderDesc.capsule(capsuleHalfHeight, playerRadius).setDensity(1.5); 
+            world.createCollider(playerColliderDesc, playerBodyRB);
+
+            camera.position.y = playerHeight * 0.9;
+        }
+
+        function handleGamepadInput(deltaTime) {
+            if (!activeGamepad || !playerBodyRB) return;
+
+            const LS_X = activeGamepad.axes[0] || 0; 
+            const LS_Y = activeGamepad.axes[1] || 0; 
+
+            const inputThreshold = 0.1;
+            let isMoving = Math.abs(LS_X) > inputThreshold || Math.abs(LS_Y) > inputThreshold;
+
+            const bodyRapierQuat = playerBodyRB.rotation();
+            tempQuaternion.set(bodyRapierQuat.x, bodyRapierQuat.y, bodyRapierQuat.z, bodyRapierQuat.w);
+
+            const bodyForward = new THREE.Vector3(0, 0, -1).applyQuaternion(tempQuaternion);
+            const bodyRight = new THREE.Vector3(1, 0, 0).applyQuaternion(tempQuaternion);
+
+            const desiredVelocity = tempVector3.set(0,0,0);
+            desiredVelocity.addScaledVector(bodyForward, -LS_Y * moveSpeed);
+            desiredVelocity.addScaledVector(bodyRight, LS_X * moveSpeed);
+            
+            const currentLinvel = playerBodyRB.linvel();
+            if (isMoving) {
+                playerBodyRB.setLinvel({ x: desiredVelocity.x, y: currentLinvel.y, z: desiredVelocity.z }, true);
+            } else {
+                playerBodyRB.setLinvel({ x: currentLinvel.x * 0.80, y: currentLinvel.y, z: currentLinvel.z * 0.80 }, true);
+            }
+        }
+
+        function handleGamepadRotation(deltaTime) {
+            if (!activeGamepad || !playerBodyRB) return;
+
+            const RS_X = activeGamepad.axes[2] || 0;
+            const inputThreshold = 0.1;
+
+            if (Math.abs(RS_X) > inputThreshold) {
+                const deltaYaw = -RS_X * rotationSpeed * deltaTime; 
+                const currentBodyRapierQuat = playerBodyRB.rotation();
+                tempQuaternion.set(currentBodyRapierQuat.x, currentBodyRapierQuat.y, currentBodyRapierQuat.z, currentBodyRapierQuat.w);
+                const deltaRotationThreeQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), deltaYaw);
+                tempQuaternion.premultiply(deltaRotationThreeQuat); 
+                playerBodyRB.setRotation(tempQuaternion, true);
+            }
+        }
+        
+        function updateRigFromPhysics() {
+            if (!playerBodyRB || !xrRig) return;
+            const physPos = playerBodyRB.translation();
+            const physRot = playerBodyRB.rotation(); 
+            xrRig.position.set(physPos.x, physPos.y - (playerHeight / 2), physPos.z);
+            xrRig.quaternion.set(physRot.x, physRot.y, physRot.z, physRot.w);
+        }
+
+        function scanGamepadsAndUpdateState() {
+            if (!xrSession) { 
+                 activeGamepad = null;
+                 return;
+            }
+            let foundGamepad = null;
+            let foundSourceType = "";
+            for (const source of xrSession.inputSources) {
+                if (source.gamepad && source.gamepad.axes && source.gamepad.axes.length >= 4) { 
+                    const axes = source.gamepad.axes;
+                    if (Math.abs(axes[0]) > 0.05 || Math.abs(axes[1]) > 0.05 || Math.abs(axes[2]) > 0.05 || Math.abs(axes[3]) > 0.05) {
+                        foundGamepad = source.gamepad;
+                        foundSourceType = `XRInput (${source.handedness || 'unknown'})`;
+                        break; 
+                    }
+                    if (!foundGamepad) { 
+                        foundGamepad = source.gamepad;
+                        foundSourceType = `XRInput (${source.handedness || 'unknown'}) - standby`;
+                    }
+                }
+            }
+             if (!foundGamepad) {
+                const navGamepads = navigator.getGamepads();
+                for (const gp of navGamepads) {
+                    if (gp && gp.connected && gp.axes && gp.axes.length >= 4) {
+                        const axes = gp.axes;
+                        if (Math.abs(axes[0]) > 0.05 || Math.abs(axes[1]) > 0.05 || Math.abs(axes[2]) > 0.05 || Math.abs(axes[3]) > 0.05) {
+                            foundGamepad = gp; 
+                            foundSourceType = `Nav (${gp.id.substring(0,15)}...)`;
+                            break; 
+                        }
+                        if (!foundGamepad) { 
+                            foundGamepad = gp;
+                            foundSourceType = `Nav (${gp.id.substring(0,15)}...) - standby`;
+                        }
+                    }
+                }
+            }
+            
+            if (foundGamepad && foundSourceType.endsWith('standby')) {
+                const axes = foundGamepad.axes;
+                if (Math.abs(axes[0]) < 0.05 && Math.abs(axes[1]) < 0.05 && Math.abs(axes[2]) < 0.05 && Math.abs(axes[3]) < 0.05) {
+                    activeGamepad = null;
+                    gamepadSourceType = "";
+                } else {
+                    activeGamepad = foundGamepad;
+                    gamepadSourceType = foundSourceType.replace(' - standby', '');
+                }
+            } else {
+                 activeGamepad = foundGamepad;
+                 gamepadSourceType = foundGamepad ? foundSourceType : "";
+            }
+        }
+
+        function animate() {
+            const deltaTime = clock.getDelta();
+            xrSession = renderer.xr.getSession(); 
+
+            updateHeadMovement(deltaTime);
+
+            if (xrSession) { 
+                scanGamepadsAndUpdateState(); 
+                handleGamepadInput(deltaTime); 
+                handleGamepadRotation(deltaTime);
+            } else {
+                activeGamepad = null;
+            }
+
+            world.step(); 
+            updateRigFromPhysics(); 
+
+            if (debugInfoElement) {
+                let dbg = `XR Active: ${xrSession !== null}<br>`;
+                if (activeGamepad) {
+                     const axes = activeGamepad.axes;
+                    dbg += `Gamepad: ${gamepadSourceType}<br>LS:(${axes[0].toFixed(2)},${axes[1].toFixed(2)}) RS:(${axes[2].toFixed(2)},${axes[3].toFixed(2)})<br>`;
+                } else {
+                    dbg += "No active gamepad.<br>";
+                }
+                if (playerBodyRB) {
+                    const p = playerBodyRB.translation();
+                    const r = playerBodyRB.rotation();
+                    const bodyEuler = new THREE.Euler().setFromQuaternion(new THREE.Quaternion(r.x,r.y,r.z,r.w), 'YXZ');
+                    dbg += `BodyRB: P(${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)}) R(Y:${bodyEuler.y.toFixed(2)})<br>`;
+                }
+                const headPos = headContainer.position;
+                dbg += `Head Offset: (${headPos.x.toFixed(2)}, ${headPos.y.toFixed(2)}, ${headPos.z.toFixed(2)})<br>`;
+                debugInfoElement.innerHTML = dbg;
+            }
+            
+            renderer.render(scene, camera); 
+        }
+        main().catch(console.error);
+    </script>
+</body>
+</html>
